@@ -204,6 +204,38 @@ fn a_human_key_pairs_and_wrong_role_host_or_format_is_refused_without_dialling()
         assert_no_secret_in(&error, &host.info);
     }
 
+    // A paste is validated as pasted: an inner space or an oversized value is
+    // refused whole, never silently repaired into an accepted key.
+    terminal.open_connect();
+    terminal.fill_connect(&address_of(&host.info), host.info.host.address.port(), "");
+    terminal.app.state.connect.as_mut().expect("form").field =
+        serial_nexus_terminal::state::ConnectField::Key;
+    let human = human_key(&host.info);
+    terminal
+        .app
+        .handle_paste(&format!("{} {}", &human[..40], &human[40..]));
+    let form = terminal.app.state.connect.as_ref().expect("form");
+    assert!(form.key.is_empty(), "nothing was inserted");
+    assert!(
+        form.error.as_deref().unwrap_or("").contains("paste"),
+        "{:?}",
+        form.error
+    );
+    terminal
+        .app
+        .handle_paste(&format!("snx1.human.{}", "A".repeat(5_000)));
+    let form = terminal.app.state.connect.as_ref().expect("form");
+    assert!(form.key.is_empty(), "nothing was inserted");
+    assert!(
+        form.error.as_deref().unwrap_or("").contains("too long"),
+        "{:?}",
+        form.error
+    );
+    assert!(
+        terminal.app.state.remote_labels.is_empty(),
+        "nothing dialled"
+    );
+
     // The right key, address and port connect and show the host's devices.
     terminal.edit_connect(|form| {
         form.address = address_of(&host.info);

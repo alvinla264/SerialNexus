@@ -454,16 +454,17 @@ impl ConnectForm {
         self.push_str(&ch.to_string());
     }
 
-    /// Insert text as one action, as a terminal paste does. Only printable
-    /// ASCII is kept, and every field stays bounded.
+    /// Insert text as one action, as a terminal paste does.
+    ///
+    /// A sharing key is taken as pasted (surrounding whitespace trimmed) and
+    /// either inserted whole or refused: a key is never silently repaired or
+    /// truncated, so the strict parser sees exactly what the person pasted.
+    /// Other fields keep their printable-only behaviour, but an oversized
+    /// paste is refused rather than cut short.
     pub fn push_str(&mut self, text: &str) {
-        for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
-            let field = self.field.text_mut(self);
-            if field.len() < MAX_FORM_FIELD_BYTES {
-                field.push(ch);
-            }
-        }
-        self.error = None;
+        let strict = self.field == ConnectField::Key;
+        let result = paste_into(self.field.text_mut(self), strict, text);
+        self.error = result.err().map(str::to_string);
     }
 
     pub fn backspace(&mut self) {
@@ -487,6 +488,31 @@ impl Default for ConnectForm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Insert one whole pasted value into a field.
+///
+/// `strict` is used for sharing keys: surrounding whitespace is allowed (a
+/// terminal paste often ends with a newline), but every remaining character
+/// must be printable ASCII and the result must fit the field. Nothing is
+/// dropped or truncated, so the key parser validates exactly what was pasted.
+fn paste_into(field: &mut String, strict: bool, text: &str) -> Result<(), &'static str> {
+    let trimmed = text.trim();
+    if strict && !trimmed.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(
+            "the pasted sharing key contains a space, line break or non-ASCII character; paste it again unchanged",
+        );
+    }
+    let value: String = if strict {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().filter(|ch| ch.is_ascii_graphic()).collect()
+    };
+    if field.len() + value.len() > MAX_FORM_FIELD_BYTES {
+        return Err("the pasted value is too long for this field");
+    }
+    field.push_str(&value);
+    Ok(())
 }
 
 fn mask(value: &str) -> String {
@@ -566,14 +592,12 @@ impl McpPairForm {
         self.push_str(&ch.to_string());
     }
 
+    /// Insert text as one action, strict for the AI key: a key is inserted
+    /// whole or refused, never silently repaired or truncated.
     pub fn push_str(&mut self, text: &str) {
-        for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
-            let field = self.field.text_mut(self);
-            if field.len() < MAX_FORM_FIELD_BYTES {
-                field.push(ch);
-            }
-        }
-        self.error = None;
+        let strict = self.field == McpField::Key;
+        let result = paste_into(self.field.text_mut(self), strict, text);
+        self.error = result.err().map(str::to_string);
         self.confirm_replace = false;
     }
 
@@ -2534,13 +2558,30 @@ mod sharing_tests {
     }
 
     #[test]
-    fn form_pastes_are_printable_only_and_bounded() {
+    fn form_pastes_are_strict_for_keys_and_bounded() {
         let mut form = ConnectForm::new();
         form.field = ConnectField::Key;
-        form.push_str("line one\nline\ttwo");
-        assert_eq!(form.key, "lineonelinetwo");
+        form.push_str("  snx1.human.abc\r\n");
+        assert_eq!(form.key, "snx1.human.abc", "surrounding whitespace is fine");
+        assert!(form.error.is_none());
+
+        // A key is never silently repaired: an inner space or a non-ASCII
+        // character refuses the whole paste and leaves the field alone.
+        let before = form.key.clone();
+        form.push_str("snx1.human.a bc");
+        assert_eq!(form.key, before);
+        assert!(form.error.as_deref().unwrap_or("").contains("paste"));
+        form.push_str("snx1.human.abc\u{200b}");
+        assert_eq!(form.key, before);
+        form.error = None;
+        form.push_str("snx1.human.abc");
+        assert_eq!(form.key, format!("{before}snx1.human.abc"));
+
+        // An oversized paste is refused, never truncated into another value.
+        let before = form.key.clone();
         form.push_str(&"A".repeat(MAX_FORM_FIELD_BYTES + 100));
-        assert_eq!(form.key.len(), MAX_FORM_FIELD_BYTES);
+        assert_eq!(form.key, before);
+        assert!(form.error.as_deref().unwrap_or("").contains("too long"));
 
         let mut mcp = McpPairForm::new();
         mcp.field = McpField::Key;
@@ -2548,6 +2589,8 @@ mod sharing_tests {
         assert_eq!(mcp.key, "snx1.ai.abc");
         assert_eq!(mcp.value(McpField::Key), "••••••••");
         assert!(!mcp.confirm_replace);
+        mcp.push_str("snx1.ai.a b");
+        assert_eq!(mcp.key, "snx1.ai.abc");
     }
 
     #[test]

@@ -121,6 +121,15 @@ pub enum PeerError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error(
+        "the remote pairing file {path} was replaced, but its directory could not be synced, so the save may not survive a crash: {source}"
+    )]
+    Durability {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// What saving one endpoint did.
@@ -576,16 +585,21 @@ fn write_peer_file(path: &Path, text: &str) -> Result<(), PeerError> {
             source,
         });
     }
-    // Make the rename durable. Not every filesystem permits syncing a
-    // directory; the replacement itself already happened.
+    // Make the rename durable. The content is already replaced at this point,
+    // so a failure is reported as such instead of pretending the save is
+    // durable; the person can check the file and decide.
     if let Some(parent) = path.parent() {
         let directory = if parent.as_os_str().is_empty() {
             Path::new(".")
         } else {
             parent
         };
-        if let Ok(directory) = File::open(directory) {
-            let _ = directory.sync_all();
+        let sync = File::open(directory).and_then(|directory| directory.sync_all());
+        if let Err(source) = sync {
+            return Err(PeerError::Durability {
+                path: path.to_path_buf(),
+                source,
+            });
         }
     }
     Ok(())

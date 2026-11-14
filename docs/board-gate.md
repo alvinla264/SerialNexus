@@ -79,16 +79,61 @@ Optional probe and firmware echo (only if the existing firmware echoes it):
 Expected lines: `1/7 local open`, `2/7 sharing: bind=...`, `3/7 remote pair`,
 `4/7 remote list`, `5/7 remote join`, `6/7 remote read`, `7/7 uncheck revoked
 remote access`, then `sharing stopped; local history ... lines`, and finally
-`test result: ok. 1 passed`. Then, on the same exact head, run the terminal's
-pairing acceptance in a PTY: start sharing, open `p`, confirm a human key and
-an MCP/AI key are shown; paste the human key into another terminal's Connect
-form and read the board; restart sharing and confirm the old key is refused;
-press `m` and save the AI key, then run the remote MCP stdio gate below with
-that terminal-written pairing file. Never print a key or credential.
+`test result: ok. 1 passed`.
+
+Then, on the same exact head, run the terminal-first acceptance below: it uses
+the real `serial-nexus-terminal` against a second terminal and the same board,
+and the board's new key flow is exercised end to end without printing any key
+or credential.
+
+## Terminal-first sharing-key acceptance
+
+This is the gate that covers the new normal pairing experience on real
+hardware. On the coordinator's machine:
+
+1. Start the host terminal. In Settings, set a concrete LAN address and port,
+   check the board, Save, then start sharing (`s`). Open the pairing view
+   (`p`) and confirm it shows the bound address, a **Human terminal key** and a
+   distinct **MCP/AI key**, both starting `snx1.`. Press `a` and confirm the
+   older host fields (host name, `certificate SHA-256`, CA and two raw
+   credentials) are still shown; press `a` again.
+2. Start a second `serial-nexus-terminal` on another machine (or another
+   user's session). `[ Connect ]`, type the host address and port, then paste
+   the whole **human key** in one action and press Enter. Confirm the board
+   appears under `Remote <address:port>`, open it and read real firmware
+   output. This proves the normal key path, strict role/host checks, TLS CA,
+   name and pin verification, and the selected-device ACL.
+3. On the host, stop and restart sharing. In the second terminal, try the same
+   old human key again: it must fail clearly and must not print the key or
+   fall back to an unverified connection. Pair with the new key.
+4. In the host terminal's sidebar press `m`, enter the address, port and the
+   host's new **MCP/AI key**, and press Enter. Confirm the terminal says the
+   MCP pairing was saved and that `~/.config/serial-nexus/mcp-peers.json` is
+   mode `0600`. Press `m` again with the same endpoint and confirm that Enter
+   asks before replacing and Esc cancels without changing the file.
+5. Keep that terminal (which owns the sharing session) running and run the
+   terminal-written MCP gate from the same exact head:
+
+   ```sh
+   SER18_BOARD_GATEWAY_SOCKET=/run/user/1000/serial-nexus/gateway.sock    SER18_BOARD_PEERS=$HOME/.config/serial-nexus/mcp-peers.json    SER18_BOARD_BIND=192.168.1.20:7331    SER18_BOARD_REMOTE_PATH=/dev/ttyACM0    SER18_BOARD_PROBE=$'hello\r\n'    SER18_BOARD_EXPECT_ECHO=hello    nix develop -c cargo test -p serial-nexus-mcp --test board_gate \
+     real_board_terminal_written_pairing_gate -- --ignored --nocapture
+   ```
+
+   This gate starts no share and changes nothing: it loads the exact file the
+   terminal wrote, reaches the host through the running terminal's gateway,
+   lists the checked board, opens it, sends the probe, reads the echo, and
+   scans MCP output/stderr for both the AI credential and the AI sharing key.
+   Use the remote path the terminal lists (a `/dev/serial/by-id` device may
+   appear as `/dev/ttyACM*`).
+
+Do not print, screenshot or paste any key or credential while running this;
+the terminal masks key fields and these tests print only endpoints and paths.
 
 ## Remote MCP stdio gate
 
-Run this second ignored test at the same exact head. It creates a unique
+The standalone variant starts its own sharing session. Run it at the same exact
+head when a self-contained check is wanted; the terminal-first gate above is
+the one that consumes the terminal-written pairing file. This test creates a unique
 TemporaryDirectory for the core Unix socket and another for MCP configuration;
 the MCP process receives `SERIAL_NEXUS_SOCKET`, `SERIAL_NEXUS_MCP_PEERS`, and
 `XDG_CONFIG_HOME` pointing only into those temporary directories. The pairing
