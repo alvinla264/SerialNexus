@@ -168,8 +168,11 @@ LAN sharing and remote-client terms (the core contract is in
   bound address and the two distinct sharing keys; `c` and `C` ask the terminal
   (OSC 52) to copy the complete human or MCP/AI key, because selecting the
   hard-wrapped rows would add line breaks; `v`/`V` show one key as a single
-  soft-wrapped line for a terminal that ignores clipboard escapes. `a` toggles
-  the **older host fields** (host name, fingerprint, CA certificate and the separate raw
+  soft-wrapped line for a terminal that ignores clipboard escapes (and write an
+  owner-only key file instead if the pane is too short for the whole line);
+  `w`/`W` write that file directly. A **key file** is read back on the
+  receiving machine by typing `file:/absolute/path` in the key field. `a`
+  toggles the **older host fields** (host name, fingerprint, CA certificate and the separate raw
   credentials) for a terminal that predates keys.
 - **Connect form**: the remote terminal's memory-only form for a host address,
   port and one human sharing key. `Ctrl+A` switches it to the older host fields

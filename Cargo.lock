@@ -721,6 +721,7 @@ dependencies = [
  "base64",
  "crossbeam-channel",
  "crossterm",
+ "libc",
  "nix 0.29.0",
  "ratatui",
  "serde",

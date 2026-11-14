@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod input;
+pub mod pairing_file;
 pub mod render;
 pub mod screen;
 pub mod settings;

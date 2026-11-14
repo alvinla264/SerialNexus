@@ -938,11 +938,11 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
             .to_string(),
     );
     lines.push(
-        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key."
+        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key; w or W writes it to an owner-only file instead."
             .to_string(),
     );
     lines.push(
-        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key to return."
+        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key. A pane too short for the line writes the key file instead."
             .to_string(),
     );
     if state.pairing_advanced {
@@ -1303,7 +1303,7 @@ fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
             " Ctrl+S save · Esc cancel · Tab/↑↓ move · Space/Enter toggle or edit ".to_string()
         }
         (Focus::Right, View::Pairing) => {
-            " ↑/↓ scroll · c/C copy · v/V select-copy · a older details · s stop · Esc back "
+            " ↑/↓ scroll · c/C copy · v/V show · w/W file · a older details · s stop · Esc back "
                 .to_string()
         }
         (Focus::Right, View::Connect) => {

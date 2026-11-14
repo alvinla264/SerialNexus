@@ -257,6 +257,57 @@ fn a_human_key_pairs_and_wrong_role_host_or_format_is_refused_without_dialling()
 }
 
 #[test]
+fn a_key_can_arrive_in_a_private_file_instead_of_the_clipboard() {
+    let _guard = serial_test();
+    let device = SimulatedDevice::new();
+    let host = start_host(&device);
+    let (_local, socket) = start_core(Duration::from_secs(30), Duration::from_secs(300), 500);
+    let mut terminal = Terminal::new(&socket);
+    let directory = TempDir::new().expect("key dir");
+    let path = directory.path().join("human.key");
+    std::fs::write(&path, format!("{}\n", human_key(&host.info))).expect("write");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+    terminal.open_connect();
+    terminal.fill_connect(
+        &address_of(&host.info),
+        host.info.host.address.port(),
+        &format!("file:{}", path.display()),
+    );
+    terminal.app.submit_connect();
+    assert!(
+        terminal.app.state.connect.is_none(),
+        "the file key paired: {:?}",
+        terminal
+            .app
+            .state
+            .connect
+            .as_ref()
+            .and_then(|form| form.error.clone())
+    );
+    assert_eq!(terminal.app.state.remote_labels.len(), 1);
+
+    // A file other users can read is refused whole, before dialling, and the
+    // error never repeats the key.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    terminal.open_connect();
+    terminal.fill_connect(
+        &address_of(&host.info),
+        host.info.host.address.port(),
+        &format!("file:{}", path.display()),
+    );
+    terminal.app.submit_connect();
+    let error = terminal.form_error();
+    assert!(error.contains("600"), "{error}");
+    assert_no_secret_in(&error, &host.info);
+    assert!(
+        !error.contains(&human_key(&host.info)),
+        "the key itself never appears"
+    );
+    terminal.app.shutdown();
+}
+
+#[test]
 fn an_unbracketed_invalid_mcp_key_blocks_the_save() {
     let _guard = serial_test();
     let device = SimulatedDevice::new();

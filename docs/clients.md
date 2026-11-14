@@ -427,11 +427,19 @@ human key on its clipboard, or `C` for the MCP/AI key (OSC 52; Windows Terminal
 supports copy-through OSC 52 since 1.2). A terminal that ignores or disables
 that escape leaves the clipboard unchanged. In that case press `v` (human) or
 `V` (MCP/AI): the terminal shows the key as one logical line that it soft-wraps
-across rows. Select that whole line and press any key to return; terminals that
-mark wrapped rows (Windows Terminal, xterm, tmux) copy it without inserting
-line breaks. The pairing view's own rows are hard-wrapped, so selecting those
-adds line breaks and the receiving form refuses the result; use `c`/`C` or
-`v`/`V` instead. Never put a key in a
+across rows. The terminal owns the mouse in this view, so dragging selects text
+instead of moving the app's highlight; select that whole line and press any key
+to return. Terminals that mark wrapped rows (Windows Terminal, xterm, tmux) copy
+it without inserting line breaks. If the pane is too short for the whole line,
+`v`/`V` do not clip it: they write the key to
+`$XDG_CONFIG_HOME/serial-nexus/pairing-keys/human.key` (or `ai.key`), mode
+`0600`, and say where. `w` and `W` write those files directly. Move the file to
+the receiving machine privately (USB, `scp`) and type `file:/absolute/path` in
+its key field (`Connect` or the MCP pairing form); the terminal reads it with
+the same owner-only, no-symlink rules and never prints its contents. The
+pairing view's own rows are hard-wrapped, so selecting those adds line breaks
+and the receiving form refuses the result; use `c`/`C`, `v`/`V` or `w`/`W`
+instead. Never put a key in a
 repository, issue, tool call or shell history. Keys are shown
 only to the owner, are never written to the settings file or a device, and stop
 working when sharing stops or restarts. Press `a` for the **older host fields**

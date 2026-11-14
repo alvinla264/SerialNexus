@@ -5,6 +5,7 @@
 mod support;
 
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -248,6 +249,16 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Mouse motion must not dismiss the key before a selection is copied:
+    // the app gives the mouse to the terminal while this view is open.
+    let before_motion = tui.raw_transcript().len();
+    tui.send(b"\x1b[<35;10;5M");
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(
+        tui.raw_transcript().len(),
+        before_motion,
+        "mouse motion leaves the key view open"
+    );
     tui.send_text("x");
     tui.wait_for_text("focus: pairing");
     tui.wait_for_text("Human terminal key");
@@ -271,11 +282,48 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         "the settings file never holds a pairing secret"
     );
 
-    // The pairing screen survives a narrow resize and `s` stops the session.
-    tui.resize(20, 40);
-    tui.wait_until("the pairing view at a narrow width", |text| {
-        text.contains("stop sharing") || text.contains("Sharing")
+    // In a pane too small for the whole soft-wrapped line, `w` and `v` write
+    // the complete key to an owner-only file instead of clipping it on screen.
+    tui.resize(10, 40);
+    // Wait for a redraw, not just any old text: "Esc back" fits the full-width
+    // footer but not this one.
+    tui.wait_until("the pairing view redrawn at a narrow width", |text| {
+        !text.contains("Esc back")
     });
+    // The transcript is cumulative: only bytes after the resize matter here.
+    let narrow_offset = tui.raw_transcript().len();
+    tui.send_text("w");
+    let key_path = fixture.xdg.join("serial-nexus/pairing-keys/human.key");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !key_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the key file was written"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mode = std::fs::metadata(&key_path)
+        .expect("the key file is written")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(&key_path).expect("read key file"),
+        format!("{human}\n"),
+        "the file holds the complete unchanged key"
+    );
+    // `v` takes the same safe route in this pane: no clipped modal is drawn.
+    tui.send_text("v");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !tui.raw_transcript()[narrow_offset..]
+            .windows(human.len())
+            .any(|window| window == human.as_bytes()),
+        "a too-small pane shows no clipped key"
+    );
+
+    // The pairing screen survives a narrow resize and `s` stops the session.
     tui.resize(ROWS, COLS);
     tui.wait_for_text("focus: pairing");
     tui.send_text("s");

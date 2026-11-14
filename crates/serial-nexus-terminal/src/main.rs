@@ -3,7 +3,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, KeyEventKind, MouseEvent};
+use crossterm::event::{self, Event, KeyEventKind, MouseEvent};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
@@ -84,8 +84,29 @@ fn copy_key_to_clipboard(copy: &ClipboardCopy) -> io::Result<()> {
 /// The key is not saved and stays only on this alternate screen; any key
 /// returns to the normal view.
 fn show_key_for_copy(view: &ClipboardCopy) -> io::Result<()> {
-    use std::io::Write;
     let mut stdout = io::stdout();
+    // Mouse capture would turn a drag into motion events (and the terminal
+    // could not select text), so the terminal owns the mouse while the key is
+    // shown. Only a key press returns: motion and resize must not dismiss the
+    // view before a selection is copied.
+    crossterm::execute!(stdout, crossterm::event::DisableMouseCapture)?;
+    let result = (|| {
+        draw_key_for_copy(&mut stdout, view)?;
+        loop {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => break,
+                Event::Resize(_, _) => draw_key_for_copy(&mut stdout, view)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    let restored = crossterm::execute!(stdout, crossterm::event::EnableMouseCapture);
+    result.and(restored)
+}
+
+fn draw_key_for_copy(stdout: &mut io::Stdout, view: &ClipboardCopy) -> io::Result<()> {
+    use std::io::Write;
     write!(stdout, "\x1b[2J\x1b[H")?;
     writeln!(
         stdout,
@@ -120,12 +141,6 @@ fn event_loop(
             // terminal soft-wraps, so selecting it copies the key without
             // inserted newlines. Any input returns to the TUI.
             show_key_for_copy(&view)?;
-            loop {
-                if event::poll(Duration::from_millis(100))? {
-                    let _ = event::read()?;
-                    break;
-                }
-            }
             terminal.clear()?;
             continue;
         }
