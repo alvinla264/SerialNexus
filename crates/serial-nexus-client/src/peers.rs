@@ -284,6 +284,15 @@ impl Peers {
     /// failure (unsafe permissions, a link, invalid JSON) is still an error:
     /// an absent file may be created, a broken one is never replaced.
     pub fn load_optional(path: impl AsRef<Path>) -> Result<Option<Self>, PeerError> {
+        Ok(Self::load_optional_with_bytes(path)?.map(|(peers, _)| peers))
+    }
+
+    /// Load a pairing file and keep the exact bytes that were validated, so a
+    /// later rollback can restore them without reopening a path that could
+    /// have been swapped for a symlink or FIFO in the meantime.
+    fn load_optional_with_bytes(
+        path: impl AsRef<Path>,
+    ) -> Result<Option<(Self, Vec<u8>)>, PeerError> {
         let path = path.as_ref().to_path_buf();
         let file = match open_private(&path) {
             Ok(file) => file,
@@ -346,10 +355,13 @@ impl Peers {
             }
             seen.push(canonical);
         }
-        Ok(Some(Self {
-            path,
-            peers: parsed.peers,
-        }))
+        Ok(Some((
+            Self {
+                path,
+                peers: parsed.peers,
+            },
+            text.into_bytes(),
+        )))
     }
 
     /// The pairing for exactly this address and port.
@@ -487,9 +499,9 @@ pub fn save_peer(
         reason: format!("{endpoint}: {reason}"),
     })?;
 
-    let mut peers = Peers::load_optional(&path)?
-        .map(|peers| peers.peers)
-        .unwrap_or_default();
+    let loaded = Peers::load_optional_with_bytes(&path)?;
+    let previous = loaded.as_ref().map(|(_, bytes)| bytes.clone());
+    let mut peers = loaded.map(|(peers, _)| peers.peers).unwrap_or_default();
     let wanted = endpoint.canonical();
     let outcome = match peers
         .iter()
@@ -511,19 +523,9 @@ pub fn save_peer(
         }
     };
 
-    // Keep the exact previous bytes so a failed post-rename durability step
-    // can put the old file back instead of reporting a failure after changing
-    // the entries.
-    let previous = match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => {
-            return Err(PeerError::Write {
-                path: path.clone(),
-                source,
-            })
-        }
-    };
+    // `previous` came from the same validated, no-symlink read as the parsed
+    // entries, so a failed post-rename durability step can restore it without
+    // reopening a path that may have been swapped.
     let file = PeerFile {
         version: PEERS_VERSION,
         peers,
