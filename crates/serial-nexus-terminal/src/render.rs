@@ -937,6 +937,10 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
         "Each key is a password: it is shown only here, is never saved or sent to a device, and stops working when sharing stops."
             .to_string(),
     );
+    lines.push(
+        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key."
+            .to_string(),
+    );
     if state.pairing_advanced {
         lines.push("Esc back · a hide older fields · s stops sharing · ↑/↓ scroll".to_string());
     } else {
@@ -1295,7 +1299,8 @@ fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
             " Ctrl+S save · Esc cancel · Tab/↑↓ move · Space/Enter toggle or edit ".to_string()
         }
         (Focus::Right, View::Pairing) => {
-            " ↑/↓ scroll · a older host details · s stop sharing · Esc back ".to_string()
+            " ↑/↓ scroll · c/C copy key · a older host details · s stop sharing · Esc back "
+                .to_string()
         }
         (Focus::Right, View::Connect) => {
             " Tab/↑↓ field · Ctrl+A older-host fields · Enter connects · Esc cancels ".to_string()

@@ -123,12 +123,22 @@ pub enum PeerError {
     },
 
     #[error(
-        "the remote pairing file {path} was replaced, but its directory could not be synced, so the save may not survive a crash: {source}"
+        "the remote pairing file {path} could not be made durable, so the save was rolled back and the previous pairing is unchanged: {source}"
     )]
     Durability {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+
+    #[error(
+        "the remote pairing file {path} could not be made durable and the previous pairing could not be restored either ({rollback}); check the file: {source}"
+    )]
+    DurabilityUnrestored {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+        rollback: std::io::Error,
     },
 }
 
@@ -501,6 +511,19 @@ pub fn save_peer(
         }
     };
 
+    // Keep the exact previous bytes so a failed post-rename durability step
+    // can put the old file back instead of reporting a failure after changing
+    // the entries.
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(PeerError::Write {
+                path: path.clone(),
+                source,
+            })
+        }
+    };
     let file = PeerFile {
         version: PEERS_VERSION,
         peers,
@@ -516,12 +539,13 @@ pub fn save_peer(
             reason: format!("the updated file would exceed {MAX_PEERS_FILE_BYTES} bytes"),
         });
     }
-    write_peer_file(&path, &text)?;
+    write_peer_file(&path, &text, previous.as_deref())?;
     Ok(outcome)
 }
 
 /// Replace a pairing file atomically, keeping it readable by its owner only.
-fn write_peer_file(path: &Path, text: &str) -> Result<(), PeerError> {
+/// `previous` is restored if the replacement cannot be made durable.
+fn write_peer_file(path: &Path, text: &str, previous: Option<&[u8]>) -> Result<(), PeerError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -596,11 +620,51 @@ fn write_peer_file(path: &Path, text: &str) -> Result<(), PeerError> {
         };
         let sync = File::open(directory).and_then(|directory| directory.sync_all());
         if let Err(source) = sync {
-            return Err(PeerError::Durability {
-                path: path.to_path_buf(),
-                source,
-            });
+            return match restore_peer_file(path, previous) {
+                Ok(()) => Err(PeerError::Durability {
+                    path: path.to_path_buf(),
+                    source,
+                }),
+                Err(rollback) => Err(PeerError::DurabilityUnrestored {
+                    path: path.to_path_buf(),
+                    source,
+                    rollback,
+                }),
+            };
         }
+    }
+    Ok(())
+}
+
+/// Put the previous pairing file back after a failed durability step, or
+/// remove the newly created one when there was none. The caller reports the
+/// original failure only when this succeeds.
+fn restore_peer_file(path: &Path, previous: Option<&[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(bytes) = previous else {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    };
+    let staging = staging_peer_path(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staging)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
     }
     Ok(())
 }
@@ -656,6 +720,31 @@ mod tests {
         // An empty variable is not a location.
         let empty = Peers::default_path_from(Some("".into()), Some("".into()), Some("".into()));
         assert!(matches!(empty, Err(PeerError::NoConfigDir)));
+    }
+
+    #[test]
+    fn a_failed_durability_step_can_put_the_previous_bytes_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::TempDir::new().expect("tempdir");
+        let path = directory.path().join("mcp-peers.json");
+        std::fs::write(&path, "new bytes").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        restore_peer_file(&path, Some(b"old bytes")).expect("restore");
+        assert_eq!(std::fs::read(&path).expect("read"), b"old bytes");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        restore_peer_file(&path, None).expect("remove a newly created file");
+        assert!(!path.exists());
+        // Removing an already absent file is not an error.
+        restore_peer_file(&path, None).expect("absent is fine");
     }
 
     #[test]

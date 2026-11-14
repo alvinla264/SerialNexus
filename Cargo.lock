@@ -706,6 +706,7 @@ dependencies = [
 name = "serial-nexus-terminal"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "crossbeam-channel",
  "crossterm",
  "nix 0.29.0",

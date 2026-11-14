@@ -165,7 +165,9 @@ LAN sharing and remote-client terms (the core contract is in
   into another terminal's **Connect form**; the AI key goes with them into the
   **MCP pairing form**.
 - **Pairing view**: the owner-only right-pane view (`p`). Normally it shows the
-  bound address and the two distinct sharing keys; `a` toggles the **older host
+  bound address and the two distinct sharing keys; `c` and `C` ask the terminal
+  (OSC 52) to copy the complete human or MCP/AI key, because selecting the
+  hard-wrapped rows would add line breaks. `a` toggles the **older host
   fields** (host name, fingerprint, CA certificate and the separate raw
   credentials) for a terminal that predates keys.
 - **Connect form**: the remote terminal's memory-only form for a host address,

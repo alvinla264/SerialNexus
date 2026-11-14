@@ -159,7 +159,8 @@ SER14_BOARD_BIND=192.168.1.20:0 \
 SER14_BOARD_BAUD=115200 \
 SER14_BOARD_PROBE=$'hello\\r\\n' \
 SER14_BOARD_EXPECT_ECHO=hello \
-nix develop -c cargo test -p serial-nexus-mcp --test board_gate -- --ignored --nocapture
+nix develop -c cargo test -p serial-nexus-mcp --test board_gate \
+  real_board_remote_mcp_stdio_gate -- --ignored --nocapture
 ```
 
 Do not run with the ignored flag removed: ordinary workspace tests do not open

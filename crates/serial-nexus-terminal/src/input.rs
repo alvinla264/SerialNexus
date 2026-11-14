@@ -89,6 +89,10 @@ pub enum Action {
     LeavePairing,
     /// Show or hide the older host fields in the pairing view.
     PairingToggleAdvanced,
+    /// Ask the terminal to copy the complete human key to its clipboard.
+    CopyHumanKey,
+    /// Ask the terminal to copy the complete MCP/AI key to its clipboard.
+    CopyAiKey,
     /// Scroll the pairing information back (`> 0`) or forward by lines.
     PairingScroll(i32),
     Ignore,
@@ -227,6 +231,8 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Esc => Action::LeavePairing,
             Key::Char('s') => Action::ShareToggle,
             Key::Char('a') => Action::PairingToggleAdvanced,
+            Key::Char('c') => Action::CopyHumanKey,
+            Key::Char('C') => Action::CopyAiKey,
             Key::Up => Action::PairingScroll(-1),
             Key::Down => Action::PairingScroll(1),
             Key::PageUp => Action::PairingScroll(-(state.rows().max(1) as i32)),

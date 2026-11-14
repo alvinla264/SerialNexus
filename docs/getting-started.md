@@ -204,7 +204,8 @@ a human terminal and one for MCP/AI. Each key bundles what authenticates the
 host with that role's credential:
 
 - the **human key** goes into another terminal's Connect form, together with
-  the host address and port;
+  the host address and port (press `c` in the pairing view to copy the complete
+  key, since selecting the wrapped rows adds line breaks);
 - the **AI key** is for the local terminal's MCP pairing action (`m` in the
   sidebar), together with the host address and port. It writes the
   owner-only `mcp-peers.json` that `serial-nexus-mcp` reads; follow the setup

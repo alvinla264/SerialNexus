@@ -450,8 +450,12 @@ impl ConnectForm {
         self.error = None;
     }
 
+    /// Type one character. A sharing key never silently drops one: a space or
+    /// any other character a key cannot contain is reported instead.
     pub fn push(&mut self, ch: char) {
-        self.push_str(&ch.to_string());
+        let strict = self.field == ConnectField::Key;
+        let result = type_into(self.field.text_mut(self), strict, ch);
+        self.error = result.err().map(str::to_string);
     }
 
     /// Insert text as one action, as a terminal paste does.
@@ -488,6 +492,22 @@ impl Default for ConnectForm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Insert one typed character into a field. For a sharing key, anything that
+/// is not printable ASCII is an error instead of a silent omission.
+fn type_into(field: &mut String, strict: bool, ch: char) -> Result<(), &'static str> {
+    if strict && !ch.is_ascii_graphic() {
+        return Err("a sharing key can contain only printable ASCII characters");
+    }
+    if !strict && !ch.is_ascii_graphic() {
+        return Ok(());
+    }
+    if field.len() >= MAX_FORM_FIELD_BYTES {
+        return Err("the field is full");
+    }
+    field.push(ch);
+    Ok(())
 }
 
 /// Insert one whole pasted value into a field.
@@ -622,6 +642,15 @@ impl Default for McpPairForm {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One sharing key the owner asked to copy to the terminal's clipboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardCopy {
+    /// What was copied, for the footer notice.
+    pub label: &'static str,
+    /// The complete key string, unchanged and unwrapped.
+    pub key: String,
 }
 
 /// One sidebar row: a host group heading or a device.
@@ -772,6 +801,10 @@ pub struct AppState {
     pub mcp_pair: Option<McpPairForm>,
     /// Whether the pairing view lists the older host fields as well.
     pub pairing_advanced: bool,
+    /// A key the owner asked to copy, as one unchanged string. Taken by the
+    /// event loop, which asks the terminal to put it on the clipboard with
+    /// OSC 52; nothing here touches the settings file or a device.
+    pub clipboard_copy: Option<ClipboardCopy>,
     rows: usize,
     cols: usize,
 }
@@ -807,6 +840,7 @@ impl AppState {
             connect: None,
             mcp_pair: None,
             pairing_advanced: false,
+            clipboard_copy: None,
             rows: rows.max(1),
             cols: cols.max(1),
         }
@@ -2576,6 +2610,12 @@ mod sharing_tests {
         form.error = None;
         form.push_str("snx1.human.abc");
         assert_eq!(form.key, format!("{before}snx1.human.abc"));
+
+        // Typed characters are strict too: a space is reported, not dropped.
+        form.error = None;
+        form.push(' ');
+        assert_eq!(form.key, format!("{before}snx1.human.abc"));
+        assert!(form.error.as_deref().unwrap_or("").contains("printable"));
 
         // An oversized paste is refused, never truncated into another value.
         let before = form.key.clone();

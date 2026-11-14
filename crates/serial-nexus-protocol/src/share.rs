@@ -425,6 +425,14 @@ impl SharingKey {
             k: key.secret.credential.clone(),
         };
         let body = serde_json::to_vec(&payload).map_err(|_| SharingKeyError::BadFormat)?;
+        // The parser bounds the decoded payload as well as the key text, so
+        // encoding must refuse anything the parser would reject.
+        if body.len() > MAX_SHARING_KEY_PAYLOAD_BYTES {
+            return Err(SharingKeyError::TooLong {
+                size: body.len(),
+                max: MAX_SHARING_KEY_PAYLOAD_BYTES,
+            });
+        }
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&body);
         let role = match key.secret.role {
             PairingRole::Human => "human",
@@ -1340,6 +1348,17 @@ mod sharing_key_tests {
         // Non-canonical base64: an ignored padding character.
         let padded = format!("{}.=", key(PairingRole::Human));
         assert!(SharingKey::parse(&padded).is_err());
+    }
+
+    #[test]
+    fn the_encoder_refuses_a_key_the_parser_would_reject() {
+        // A large CA makes the payload exceed the parser's bound even though
+        // the final key stays under the string bound.
+        let mut paired = paired_host();
+        paired.ca_cert_der_b64 = crate::encode_bytes(&[9u8; 1_500]);
+        let error = SharingKey::encode(&paired, &secret(PairingRole::Ai))
+            .expect_err("an unparseable key is not produced");
+        assert!(matches!(error, SharingKeyError::TooLong { .. }), "{error}");
     }
 
     #[test]

@@ -20,8 +20,8 @@ use crate::input::{echo_key, map_key, Action, Key};
 use crate::render::{hit_test, pairing_max_scroll, panes, settings_hit_test, Hit, SettingsHit};
 use crate::settings::{SettingsStore, TerminalSettings};
 use crate::state::{
-    short_holder, AppState, ConnectForm, DeviceEntry, EndpointId, Focus, FormMode, McpPairForm,
-    Notice, SessionKey, SidebarButton, View, LOCAL_ENDPOINT,
+    short_holder, AppState, ClipboardCopy, ConnectForm, DeviceEntry, EndpointId, Focus, FormMode,
+    McpPairForm, Notice, SessionKey, SidebarButton, View, LOCAL_ENDPOINT,
 };
 
 /// Why saving an MCP pairing stopped.
@@ -521,6 +521,8 @@ impl App {
             Action::McpCancel => self.leave_mcp_pair(),
             Action::LeavePairing => self.leave_pairing(),
             Action::PairingToggleAdvanced => self.toggle_pairing_advanced(),
+            Action::CopyHumanKey => self.copy_pairing_key(PairingRole::Human),
+            Action::CopyAiKey => self.copy_pairing_key(PairingRole::Ai),
             Action::PairingScroll(delta) => self.scroll_pairing(delta),
             Action::Ignore => {}
         }
@@ -1282,6 +1284,43 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Put one complete sharing key, unwrapped, on the terminal's clipboard.
+    /// The pairing view's rows are hard-wrapped, so selecting them would add
+    /// line breaks; this is the private, user-directed way to move the exact
+    /// string. The event loop writes the OSC 52 sequence and clears this.
+    pub fn copy_pairing_key(&mut self, role: PairingRole) {
+        let Some(pairing) = &self.state.sharing.pairing else {
+            self.state.notice = Some(Notice::error("sharing is off: start it to copy a key"));
+            return;
+        };
+        let secret = match role {
+            PairingRole::Human => &pairing.human,
+            PairingRole::Ai => &pairing.ai,
+        };
+        let label = match role {
+            PairingRole::Human => "human terminal key",
+            PairingRole::Ai => "MCP/AI key",
+        };
+        match SharingKey::encode(&pairing.host, secret) {
+            Ok(key) => {
+                self.state.clipboard_copy = Some(ClipboardCopy { label, key });
+                self.state.notice = Some(Notice::info(format!(
+                    "asked the terminal to copy the {label}"
+                )));
+            }
+            Err(error) => {
+                self.state.notice = Some(Notice::error(format!(
+                    "the {label} could not be built: {error}"
+                )));
+            }
+        }
+    }
+
+    /// Take the pending clipboard request, if any.
+    pub fn take_clipboard_copy(&mut self) -> Option<ClipboardCopy> {
+        self.state.clipboard_copy.take()
     }
 
     /// Show or hide the older host fields in the pairing view.

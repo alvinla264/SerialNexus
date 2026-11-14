@@ -67,6 +67,54 @@ fn row_with(tui: &TuiSession, needle: &str) -> u16 {
         .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{}", tui.text()))
 }
 
+/// Every complete key the TUI asked the terminal to copy, in order. Never
+/// printed by a test; only prefix and length are asserted.
+fn copied_keys(transcript: &[u8]) -> Vec<String> {
+    use base64::Engine as _;
+    let start = b"\x1b]52;c;";
+    let end = b"\x1b\\";
+    let mut keys = Vec::new();
+    let mut offset = 0usize;
+    while let Some(found) = transcript[offset..]
+        .windows(start.len())
+        .position(|window| window == start)
+    {
+        let payload_start = offset + found + start.len();
+        let Some(rest) = transcript
+            .get(payload_start..)
+            .and_then(|rest| rest.windows(end.len()).position(|window| window == end))
+        else {
+            break;
+        };
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD
+            .decode(&transcript[payload_start..payload_start + rest])
+        {
+            if let Ok(key) = String::from_utf8(bytes) {
+                keys.push(key);
+            }
+        }
+        offset = payload_start + rest + end.len();
+    }
+    keys
+}
+
+fn wait_for_copied_key(tui: &mut TuiSession, prefix: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if copied_keys(&tui.raw_transcript())
+            .iter()
+            .any(|key| key.starts_with(prefix))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no complete copy request for {prefix}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn click_text(tui: &mut TuiSession, needle: &str) {
     let row = row_with(tui, needle);
     let column = tui.row(row).find(needle).expect("the needle is in its row") as u16;
@@ -157,6 +205,23 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     assert!(
         !fixture.settings_text().contains("snx1."),
         "the settings file never holds a sharing key"
+    );
+
+    // A hard-wrapped key cannot be selected without line breaks, so `c` and
+    // `C` ask the terminal to copy the complete unchanged strings.
+    tui.send_text("c");
+    wait_for_copied_key(&mut tui, "snx1.human.");
+    tui.send_text("C");
+    wait_for_copied_key(&mut tui, "snx1.ai.");
+    let copied = copied_keys(&tui.raw_transcript());
+    assert!(copied.len() >= 2, "both keys were offered for copying");
+    assert!(
+        copied.iter().all(|key| key.len() > 300),
+        "a copied key is the complete string, not a wrapped fragment"
+    );
+    assert_ne!(
+        copied.iter().find(|key| key.starts_with("snx1.human.")),
+        copied.iter().find(|key| key.starts_with("snx1.ai."))
     );
 
     // `a` shows the older host fields a terminal without keys needs.

@@ -12,7 +12,7 @@ use serial_nexus_terminal::app::App;
 use serial_nexus_terminal::input::translate;
 use serial_nexus_terminal::render::{render, stream_body_area};
 use serial_nexus_terminal::settings::{SettingsStore, TerminalSettings};
-use serial_nexus_terminal::state::Notice;
+use serial_nexus_terminal::state::{ClipboardCopy, Notice};
 use serial_nexus_terminal::terminal::{CleanupGuard, CrosstermOps};
 
 fn main() -> std::process::ExitCode {
@@ -68,6 +68,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result.map_err(Into::into)
 }
 
+/// Ask the terminal to copy one complete key with OSC 52. The key never
+/// appears in the drawn screen, a file or a log.
+fn copy_key_to_clipboard(copy: &ClipboardCopy) -> io::Result<()> {
+    use base64::Engine as _;
+    use std::io::Write;
+    let payload = base64::engine::general_purpose::STANDARD.encode(&copy.key);
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]52;c;{payload}\x1b\\")?;
+    stdout.flush()
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -76,6 +87,11 @@ fn event_loop(
     let mut last_area = Rect::default();
     loop {
         app.pump();
+        while let Some(copy) = app.take_clipboard_copy() {
+            // OSC 52 asks the terminal to set its clipboard; a terminal that
+            // does not support it simply ignores the sequence.
+            let _ = copy_key_to_clipboard(&copy);
+        }
         terminal.draw(|frame| {
             let area = frame.area();
             last_area = area;
