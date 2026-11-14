@@ -69,15 +69,34 @@ pub enum Action {
     ShareToggle,
     /// Show the owner's pairing information for the running session.
     OpenPairing,
-    /// Ask for a remote host's address, port and pairing information.
+    /// Ask for a remote host's address, port and sharing key.
     ConnectRemote,
+    /// Switch the Connect form between the sharing key and older-host fields.
+    ConnectToggleMode,
     ConnectChar(char),
     ConnectBackspace,
     ConnectNext(i32),
     ConnectSubmit,
     ConnectCancel,
+    /// Open the form that saves one endpoint's MCP/AI pairing.
+    McpPairRemote,
+    McpChar(char),
+    McpBackspace,
+    McpNext(i32),
+    McpSubmit,
+    McpCancel,
     /// Leave the pairing view for the stream.
     LeavePairing,
+    /// Show or hide the older host fields in the pairing view.
+    PairingToggleAdvanced,
+    /// Ask the terminal to copy the complete human key to its clipboard.
+    CopyHumanKey,
+    /// Ask the terminal to copy the complete MCP/AI key to its clipboard.
+    CopyAiKey,
+    /// Show the complete human key as one soft-wrapped line for manual copy.
+    ShowHumanKey,
+    /// Show the complete MCP/AI key as one soft-wrapped line for manual copy.
+    ShowAiKey,
     /// Scroll the pairing information back (`> 0`) or forward by lines.
     PairingScroll(i32),
     Ignore,
@@ -132,11 +151,25 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
     if state.view == View::Connect && state.focus == Focus::Right {
         return match key {
             Key::Esc => Action::ConnectCancel,
+            Key::Ctrl('a') => Action::ConnectToggleMode,
             Key::Enter => Action::ConnectSubmit,
             Key::Tab | Key::Down => Action::ConnectNext(1),
             Key::BackTab | Key::Up => Action::ConnectNext(-1),
             Key::Backspace => Action::ConnectBackspace,
-            Key::Char(ch) if ch.is_ascii_graphic() => Action::ConnectChar(ch),
+            // Every character reaches the form, including the space or
+            // non-ASCII character that makes a pasted key invalid.
+            Key::Char(ch) => Action::ConnectChar(ch),
+            _ => Action::Ignore,
+        };
+    }
+    if state.view == View::McpPair && state.focus == Focus::Right {
+        return match key {
+            Key::Esc => Action::McpCancel,
+            Key::Enter => Action::McpSubmit,
+            Key::Tab | Key::Down => Action::McpNext(1),
+            Key::BackTab | Key::Up => Action::McpNext(-1),
+            Key::Backspace => Action::McpBackspace,
+            Key::Char(ch) => Action::McpChar(ch),
             _ => Action::Ignore,
         };
     }
@@ -184,6 +217,7 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Char('s') => Action::ShareToggle,
             Key::Char('p') => Action::OpenPairing,
             Key::Char('c') => Action::ConnectRemote,
+            Key::Char('m') => Action::McpPairRemote,
             _ => Action::Ignore,
         },
         (Focus::Right, View::Stream) => match encode_key(key) {
@@ -202,6 +236,11 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
         (Focus::Right, View::Pairing) => match key {
             Key::Esc => Action::LeavePairing,
             Key::Char('s') => Action::ShareToggle,
+            Key::Char('a') => Action::PairingToggleAdvanced,
+            Key::Char('c') => Action::CopyHumanKey,
+            Key::Char('C') => Action::CopyAiKey,
+            Key::Char('v') => Action::ShowHumanKey,
+            Key::Char('V') => Action::ShowAiKey,
             Key::Up => Action::PairingScroll(-1),
             Key::Down => Action::PairingScroll(1),
             Key::PageUp => Action::PairingScroll(-(state.rows().max(1) as i32)),
@@ -210,7 +249,7 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
         },
         // The settings and connect branches above own their right-focused
         // views; the left-focused ones take the sidebar's commands instead.
-        (Focus::Right, View::Settings | View::Connect) => Action::Ignore,
+        (Focus::Right, View::Settings | View::Connect | View::McpPair) => Action::Ignore,
     }
 }
 
@@ -561,7 +600,7 @@ mod tests {
 #[cfg(test)]
 mod sharing_input_tests {
     use super::*;
-    use crate::state::DeviceEntry;
+    use crate::state::{ConnectForm, DeviceEntry, McpPairForm};
 
     fn state() -> AppState {
         let mut state = AppState::new(20, 80);
@@ -633,5 +672,46 @@ mod sharing_input_tests {
         );
         assert_eq!(map_key(&state, Key::Esc), Action::SettingsCancel);
         assert_eq!(map_key(&state, Key::Ctrl('s')), Action::SettingsSave);
+    }
+
+    #[test]
+    fn the_connect_form_switches_between_a_key_and_the_older_fields() {
+        let mut state = AppState::new(24, 80);
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+        state.connect = Some(ConnectForm::new());
+        assert_eq!(
+            map_key(&state, Key::Ctrl('a')),
+            Action::ConnectToggleMode,
+            "Ctrl+A shows the older host fields"
+        );
+        assert_eq!(map_key(&state, Key::Char('a')), Action::ConnectChar('a'));
+        assert_eq!(
+            map_key(&state, Key::Char(' ')),
+            Action::ConnectChar(' '),
+            "a space reaches the field so it can be reported, not dropped"
+        );
+        state.connect = Some(ConnectForm::advanced());
+        assert_eq!(map_key(&state, Key::Enter), Action::ConnectSubmit);
+    }
+
+    #[test]
+    fn the_sidebar_opens_mcp_pairing_and_the_pairing_view_its_older_details() {
+        let mut state = AppState::new(24, 80);
+        assert_eq!(map_key(&state, Key::Char('m')), Action::McpPairRemote);
+        state.view = View::Pairing;
+        state.focus = Focus::Right;
+        assert_eq!(
+            map_key(&state, Key::Char('a')),
+            Action::PairingToggleAdvanced
+        );
+        assert_eq!(map_key(&state, Key::Char('v')), Action::ShowHumanKey);
+        assert_eq!(map_key(&state, Key::Char('V')), Action::ShowAiKey);
+        state.view = View::McpPair;
+        assert_eq!(map_key(&state, Key::Char('a')), Action::McpChar('a'));
+        state.mcp_pair = Some(McpPairForm::new());
+        assert_eq!(map_key(&state, Key::Tab), Action::McpNext(1));
+        assert_eq!(map_key(&state, Key::Enter), Action::McpSubmit);
+        assert_eq!(map_key(&state, Key::Esc), Action::McpCancel);
     }
 }

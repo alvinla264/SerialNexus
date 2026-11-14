@@ -949,3 +949,127 @@ fn the_mcp_binary_is_found_from_a_nested_build_directory() {
         "a stale path under the same build tree still finds it"
     );
 }
+
+/// The terminal's own MCP pairing action writes the private file that the real
+/// MCP server then uses: no hand-edited JSON, no credential in a transcript,
+/// and no connection while the key is only being saved.
+#[test]
+fn the_terminal_pairing_form_saves_the_file_the_real_mcp_server_uses() {
+    use support::tui::{KEY_ENTER, KEY_ESC, KEY_TAB};
+
+    let _guard = serial_test();
+    let (_host_core, host_socket) =
+        start_core(Duration::from_secs(30), Duration::from_secs(300), 500);
+    let device = SimulatedDevice::new();
+    let _lister = PortListerGuard::from_path(device.path.clone());
+    let owner = Client::connect_to_socket(&host_socket, ClientInfo::human("host-terminal"))
+        .expect("owner connects");
+    let info = owner
+        .start_sharing(
+            ShareBind::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            vec![device.path.clone()],
+        )
+        .expect("sharing starts");
+
+    let (_local_core, local_socket) =
+        start_core(Duration::from_secs(30), Duration::from_secs(300), 500);
+    let xdg = TempDir::new().expect("xdg");
+    let mut terminal = TuiSession::spawn(&local_socket, xdg.path(), 32, 110);
+    terminal.wait_for_text("focus: sidebar");
+    let gateway = local_socket.with_file_name("gateway.sock");
+    wait_until(Duration::from_secs(5), || gateway.exists());
+
+    let address = info.host.address.ip().to_string();
+    let port = info.host.address.port().to_string();
+    let ai_key = serial_nexus_protocol::SharingKey::encode(&info.host, &info.ai)
+        .expect("the host issues an AI key");
+
+    let fill = |terminal: &mut TuiSession| {
+        terminal.send_text("m");
+        terminal.wait_for_text("Configure MCP pairing");
+        terminal.send_text(&address);
+        terminal.send(KEY_TAB);
+        terminal.send_text(&port);
+        terminal.send(KEY_TAB);
+        terminal.send(format!("\x1b[200~{ai_key}\x1b[201~").as_bytes());
+    };
+
+    // Saving the key writes the owner-only file and does not connect.
+    fill(&mut terminal);
+    terminal.send(KEY_ENTER);
+    terminal.wait_for_text("MCP pairing saved");
+    let peers_path = xdg.path().join("serial-nexus/mcp-peers.json");
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(&peers_path).expect("the pairing file exists");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        owner.sharing_status().expect("status").remote_clients,
+        0,
+        "configuring a key does not connect"
+    );
+    let peers = serial_nexus_client::Peers::load(&peers_path).expect("load");
+    assert_eq!(peers.len(), 1);
+
+    // The real MCP server reaches the host through the terminal gateway using
+    // only the default per-user file the form wrote.
+    let gateway_text = gateway.to_string_lossy().into_owned();
+    let mut mcp = Mcp::spawn(
+        &[
+            ("SERIAL_NEXUS_GATEWAY_SOCKET", &gateway_text),
+            ("HOME", &xdg.path().to_string_lossy()),
+            ("XDG_CONFIG_HOME", &xdg.path().to_string_lossy()),
+        ],
+        &[
+            &info.ai.credential,
+            &info.human.credential,
+            &ai_key,
+            &info.host.ca_cert_der_b64,
+        ],
+    );
+    let (is_error, text, structured) = mcp.call_tool("list_devices", remote_args(&info, json!({})));
+    assert!(!is_error, "{text}");
+    assert!(text.contains(&device.path), "{text}");
+    assert!(
+        text.contains(&format!("remote {}", info.host.address)),
+        "{text}"
+    );
+    let structured = structured.expect("structured list");
+    assert_eq!(
+        structured["remote_endpoint"]["port"],
+        json!(info.host.address.port())
+    );
+    mcp.finish();
+
+    // Replacing an existing endpoint asks first; Esc cancels and keeps the file.
+    let before = std::fs::read(&peers_path).expect("read");
+    fill(&mut terminal);
+    terminal.send(KEY_ENTER);
+    terminal.wait_for_text("already paired");
+    terminal.send(KEY_ESC);
+    terminal.wait_for_text("focus: sidebar");
+    assert_eq!(std::fs::read(&peers_path).expect("read"), before);
+
+    // Pressing Enter again confirms the replacement.
+    fill(&mut terminal);
+    terminal.send(KEY_ENTER);
+    terminal.wait_for_text("already paired");
+    terminal.send(KEY_ENTER);
+    terminal.wait_for_text("MCP pairing replaced");
+    let peers = serial_nexus_client::Peers::load(&peers_path).expect("load after replace");
+    assert_eq!(peers.len(), 1);
+
+    // No pairing secret ever reaches the terminal's output.
+    let transcript = terminal.quit_capturing();
+    assert!(
+        !transcript_leaks(&transcript, &info.ai.credential),
+        "the AI credential reached the terminal transcript"
+    );
+    assert!(
+        !transcript_leaks(&transcript, &info.human.credential),
+        "the human credential reached the terminal transcript"
+    );
+    assert!(
+        !transcript_leaks(&transcript, &ai_key),
+        "the pasted AI key reached the terminal transcript"
+    );
+}

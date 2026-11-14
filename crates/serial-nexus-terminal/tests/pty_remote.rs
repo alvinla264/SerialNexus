@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use serial_nexus_client::{ClientInfo, ShareBind};
-use serial_nexus_protocol::ShareSessionInfo;
+use serial_nexus_protocol::{ShareSessionInfo, SharingKey};
 use support::tui::{TuiSession, KEY_CTRL_BRACKET, KEY_ENTER, KEY_TAB};
 use support::{connect, start_core, PortListerGuard, SimulatedDevice};
 use tempfile::TempDir;
@@ -108,18 +108,34 @@ fn the_connect_form_pairs_with_a_host_and_opens_its_allowed_unopened_port() {
     click_text(&mut tui, "[ Connect ]");
     tui.wait_for_text("focus: connect");
     tui.wait_for_text("Host address");
+    tui.wait_for_text("Human sharing key");
     tui.send_text(&fixture.info.host.address.ip().to_string());
     tui.send(KEY_TAB);
     tui.send_text(&fixture.info.host.address.port().to_string());
     tui.send(KEY_TAB);
-    tui.send_text(&fixture.info.host.ca_cert_der_b64);
-    tui.send(KEY_TAB);
-    tui.send_text(&fixture.info.host.host_cert_fingerprint_sha256);
-    tui.send(KEY_TAB);
-    tui.send_text(&fixture.info.human.credential);
+    // Paste the whole long key as one bracketed-paste action, the way a
+    // terminal sends a clipboard paste.
+    let key = SharingKey::encode(&fixture.info.host, &fixture.info.human)
+        .expect("the host issues a human key");
+    // A person pastes after the field has settled; avoiding an artificial
+    // zero-gap burst keeps the check about the terminal, not about scheduling.
+    std::thread::sleep(Duration::from_millis(100));
+    tui.send(format!("\x1b[200~{key}\x1b[201~").as_bytes());
+    tui.wait_for_text("••••");
+    let transcript = String::from_utf8_lossy(&tui.raw_transcript()).into_owned();
+    assert!(
+        !transcript.contains(&key),
+        "the terminal never draws the pasted key"
+    );
+    assert!(transcript.contains("••••"), "the key is masked in the form");
     tui.send(KEY_ENTER);
 
     tui.wait_for_text("connected to");
+    let transcript = String::from_utf8_lossy(&tui.raw_transcript()).into_owned();
+    assert!(
+        !transcript.contains(&key),
+        "the terminal never draws the pasted key"
+    );
     tui.wait_for_text("Remote 127.0.0.1:");
     tui.wait_for_text(&path);
     // The group heading names the endpoint.

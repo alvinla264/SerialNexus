@@ -199,23 +199,24 @@ Share button (or `s`). See
 [Sharing devices on the LAN from the terminal](clients.md#sharing-devices-on-the-lan-from-the-terminal)
 for the controls.
 
-The pairing view shows two separate credentials:
+The pairing view shows two clearly labelled, distinct **sharing keys**, one for
+a human terminal and one for MCP/AI. Each key bundles what authenticates the
+host with that role's credential:
 
-- the **human credential** goes into another terminal's Connect form, together
-  with the host address, port, CA certificate and certificate fingerprint;
-- the **MCP credential** is for `serial-nexus-mcp` running on the laptop whose
-  terminal owns the gateway. The MCP server uses that local gateway to connect
-  onward to the sharing host. Add the remote endpoint, CA certificate,
-  fingerprint and credential to the local MCP process's private `mcp-peers.json`
-  file with mode `0600`; follow the setup and tool-call examples in
+- the **human key** goes into another terminal's Connect form, together with
+  the host address and port (press `c` in the pairing view to copy the complete
+  key, since selecting the wrapped rows adds line breaks);
+- the **AI key** is for the local terminal's MCP pairing action (`m` in the
+  sidebar), together with the host address and port. It writes the
+  owner-only `mcp-peers.json` that `serial-nexus-mcp` reads; follow the setup
+  and tool-call examples in
   [`serial-nexus-mcp/README.md`](../crates/serial-nexus-mcp/README.md#reach-a-device-shared-by-another-host).
 
-Do not paste either credential into shell history, a repository, an issue or a
-tool call. If you write the MCP credential down, use a file only your user can
-read (mode `0600`) outside the repository, for example
-`~/.config/serial-nexus/remote-mcp-credential`. Credentials are per sharing
-session: stopping or restarting sharing invalidates the old ones and new ones
-must be paired.
+Treat either key as a password. Do not paste it into shell history, a
+repository, an issue or a tool call. Keys and credentials are per sharing
+session: stopping or restarting sharing invalidates the old ones, new ones must
+be paired, and an old key fails rather than connecting insecurely. Press `a` in
+the pairing view for the older separate fields when a terminal predates keys.
 
 **Exposure.** The listener exists only on the chosen address, and only while
 the terminal that started sharing is running. Firewall rules and router/NAT

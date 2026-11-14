@@ -20,7 +20,10 @@ v0.1.0 contents; it is not a stability promise.
 - **Opt-in LAN sharing.** Sharing is off by default and has no listener until the
   terminal starts a session for one concrete IPv4 or IPv6 address. Remote
   clients must verify the host certificate and pin its fingerprint, present a
-  pairing credential, and use only the devices the owner checked. Stopping
+  pairing credential, and use only the devices the owner checked. The normal
+  pairing experience is a single copy-and-paste sharing key per role (human or
+  MCP/AI); older separate fields remain under Advanced, and the terminal can
+  save the AI key to the owner-only MCP pairing file. Stopping
   sharing or closing the owning terminal revokes the session.
 - **Client library and protocol.** `serial-nexus-client` and
   `serial-nexus-protocol` provide the local client API and wire types used by

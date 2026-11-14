@@ -61,6 +61,9 @@ fn opens_two_devices_switches_and_keeps_both_connected() {
         serial_nexus_terminal::state::DeviceEntry::new(&first.path),
         serial_nexus_terminal::state::DeviceEntry::new(&second.path),
     ]);
+    // Rows are sorted by path, so `first` and `second` do not follow the
+    // order the PTYs were created in. Choose the intended row by path.
+    assert!(app.state.select_path(&first.path));
     app.handle_key(Key::Char('b'));
     assert!(app.state.prompt.is_some());
     for ch in "19200".chars() {
@@ -832,21 +835,23 @@ fn a_double_click_opens_or_joins_the_device_under_the_mouse() {
         .unwrap()
         .list;
 
-    // Double-click the first row: a closed device asks for its baud rate.
+    // Double-click the row for `first`: rows are sorted by path, so the
+    // first row is not necessarily the first PTY created.
+    let row = app
+        .state
+        .devices
+        .iter()
+        .position(|device| device.path == first.path)
+        .expect("the first device has a row") as u16;
+    let y = list.y + row;
     let at = Instant::now();
-    app.handle_mouse(
-        area,
-        MouseEventKind::Down(MouseButton::Left),
-        list.x,
-        list.y,
-        at,
-    );
+    app.handle_mouse(area, MouseEventKind::Down(MouseButton::Left), list.x, y, at);
     assert!(app.state.prompt.is_none(), "one click only highlights");
     app.handle_mouse(
         area,
         MouseEventKind::Down(MouseButton::Left),
         list.x,
-        list.y,
+        y,
         at + Duration::from_millis(50),
     );
     assert!(app.state.prompt.is_some(), "the double-click asked to open");

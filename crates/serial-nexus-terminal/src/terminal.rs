@@ -3,7 +3,9 @@
 
 use std::io;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -59,7 +61,14 @@ impl TerminalOps for CrosstermOps {
         let mut stdout = io::stdout();
         // The mouse is captured so the sidebar's Settings button can be
         // clicked; the cursor stays visible, on the device's own position.
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            // A pasted sharing key arrives as one event instead of fake key
+            // presses, so it can be inserted in one action.
+            EnableBracketedPaste
+        )?;
         Ok(())
     }
 
@@ -67,6 +76,7 @@ impl TerminalOps for CrosstermOps {
         let mut stdout = io::stdout();
         let _ = execute!(
             stdout,
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
             cursor::Show

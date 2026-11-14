@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serial_nexus_client::{Client, ClientInfo, RemoteClient, ShareBind};
 
-use serial_nexus_protocol::ShareSessionInfo;
+use serial_nexus_protocol::{ShareSessionInfo, SharingKey};
 use serial_nexus_terminal::app::App;
 use serial_nexus_terminal::input::Key;
 use serial_nexus_terminal::settings::SettingsStore;
@@ -19,6 +19,10 @@ use support::{connect, start_core, wait_until, PortListerGuard, SimulatedDevice}
 use tempfile::TempDir;
 
 static REMOTE_TESTS: Mutex<()> = Mutex::new(());
+
+fn human_key(host: &ShareSessionInfo) -> String {
+    SharingKey::encode(&host.host, &host.human).expect("the host issues a human key")
+}
 
 fn serial_test() -> MutexGuard<'static, ()> {
     REMOTE_TESTS
@@ -91,9 +95,7 @@ impl Terminal {
         let form = self.app.state.connect.as_mut().expect("form");
         form.address = host.host.address.ip().to_string();
         form.port = host.host.address.port().to_string();
-        form.ca = host.host.ca_cert_der_b64.clone();
-        form.fingerprint = host.host.host_cert_fingerprint_sha256.clone();
-        form.credential = host.human.credential.clone();
+        form.key = human_key(host);
         self.app.submit_connect();
     }
 
@@ -123,6 +125,7 @@ fn reopening_connect_keeps_the_in_progress_pairing_form() {
     let form = terminal.app.state.connect.as_mut().expect("connect form");
     form.address = "192.0.2.45".into();
     form.port = "7331".into();
+    form.key = "snx1.human.pinned-key".into();
     form.ca = "pinned-ca".into();
     form.fingerprint = "pinned-fingerprint".into();
     form.credential = "in-progress-secret".into();
@@ -133,6 +136,7 @@ fn reopening_connect_keeps_the_in_progress_pairing_form() {
     let form = terminal.app.state.connect.as_ref().expect("connect form");
     assert_eq!(form.address, "192.0.2.45");
     assert_eq!(form.port, "7331");
+    assert_eq!(form.key, "snx1.human.pinned-key");
     assert_eq!(form.ca, "pinned-ca");
     assert_eq!(form.fingerprint, "pinned-fingerprint");
     assert_eq!(form.credential, "in-progress-secret");
@@ -381,9 +385,14 @@ fn a_wrong_host_certificate_is_refused_and_leaves_no_endpoint() {
     let form = terminal.app.state.connect.as_mut().expect("form");
     form.address = host.info.host.address.ip().to_string();
     form.port = host.info.host.address.port().to_string();
-    form.ca = host.info.host.ca_cert_der_b64.clone();
-    form.fingerprint = "00".repeat(32);
-    form.credential = host.info.human.credential.clone();
+    form.key = SharingKey::encode(
+        &serial_nexus_protocol::PairedHost {
+            host_cert_fingerprint_sha256: "00".repeat(32),
+            ..host.info.host.clone()
+        },
+        &host.info.human,
+    )
+    .expect("a key with the wrong pin still encodes");
     terminal.app.submit_connect();
 
     assert_eq!(
@@ -462,12 +471,18 @@ fn two_hosts_and_the_local_core_coexist_even_with_equal_device_ids() {
 
     // Typing goes only to the shown remote device, even when the highlight is
     // moved to another endpoint's row.
+    // The process-wide test lister also lists the remote PTYs for the local
+    // core, so the first Local row is not necessarily this test's local
+    // device. Choose it by path.
     let local_index = terminal
         .app
         .state
         .devices
         .iter()
-        .position(|device| device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT)
+        .position(|device| {
+            device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT
+                && device.path == local_device.path
+        })
         .expect("local row");
     terminal.app.state.select_index(local_index);
     terminal.app.write_shown(b"R", Key::Char('R'));
@@ -478,14 +493,19 @@ fn two_hosts_and_the_local_core_coexist_even_with_equal_device_ids() {
     );
 
     // The local stream still works.
-    let local_key = terminal
+    let local_key = local_device.path.clone();
+    let local_open = terminal
         .app
         .state
         .devices
         .iter()
-        .find(|device| device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT)
-        .map(|device| device.path.clone())
+        .find(|device| {
+            device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT
+                && device.path == local_key
+        })
         .expect("local path");
+    assert!(local_open.open, "the local device is already open");
+    assert_eq!(local_open.baud, Some(9_600));
     let key = terminal
         .app
         .open_endpoint(

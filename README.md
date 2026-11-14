@@ -110,8 +110,8 @@ for control, history, and lifecycle details.
 - **LAN sharing is opt-in.** Nothing listens on the network until the owning
   terminal starts a sharing session for one concrete address. The session lasts
   only while that terminal is running, exposes only the devices you checked, and
-  requires remote clients to verify the host certificate and present a pairing
-  credential.
+  requires remote clients to verify the host certificate and present the
+  credential in a session-only sharing key (one per role).
 - **Private reporting.** Report suspected vulnerabilities as described in
   [SECURITY.md](SECURITY.md), not in a public issue.
 

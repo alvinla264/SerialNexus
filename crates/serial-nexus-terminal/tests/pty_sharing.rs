@@ -67,6 +67,54 @@ fn row_with(tui: &TuiSession, needle: &str) -> u16 {
         .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{}", tui.text()))
 }
 
+/// Every complete key the TUI asked the terminal to copy, in order. Never
+/// printed by a test; only prefix and length are asserted.
+fn copied_keys(transcript: &[u8]) -> Vec<String> {
+    use base64::Engine as _;
+    let start = b"\x1b]52;c;";
+    let end = b"\x1b\\";
+    let mut keys = Vec::new();
+    let mut offset = 0usize;
+    while let Some(found) = transcript[offset..]
+        .windows(start.len())
+        .position(|window| window == start)
+    {
+        let payload_start = offset + found + start.len();
+        let Some(rest) = transcript
+            .get(payload_start..)
+            .and_then(|rest| rest.windows(end.len()).position(|window| window == end))
+        else {
+            break;
+        };
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD
+            .decode(&transcript[payload_start..payload_start + rest])
+        {
+            if let Ok(key) = String::from_utf8(bytes) {
+                keys.push(key);
+            }
+        }
+        offset = payload_start + rest + end.len();
+    }
+    keys
+}
+
+fn wait_for_copied_key(tui: &mut TuiSession, prefix: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if copied_keys(&tui.raw_transcript())
+            .iter()
+            .any(|key| key.starts_with(prefix))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no complete copy request for {prefix}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn click_text(tui: &mut TuiSession, needle: &str) {
     let row = row_with(tui, needle);
     let column = tui.row(row).find(needle).expect("the needle is in its row") as u16;
@@ -112,6 +160,47 @@ fn set_port_zero(tui: &mut TuiSession) {
 }
 
 #[test]
+fn v_shows_a_whole_key_in_an_ordinary_80x24_split_pane() {
+    let fixture = Fixture::new();
+    let path = fixture.device.path.clone();
+    let mut tui = fixture.tui();
+    tui.wait_for_text(&path);
+    open_settings(&mut tui);
+    check_device(&mut tui, &path);
+    set_port_zero(&mut tui);
+    tui.send(KEY_CTRL_S);
+    tui.wait_for_text("settings saved");
+    tui.send(KEY_CTRL_BRACKET);
+    tui.wait_for_text("focus: sidebar");
+    // Configure at the usual size, then start sharing in a real 80x24
+    // terminal, where the stream pane is much narrower than the copy view.
+    tui.resize(24, 80);
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send_text("s");
+    tui.wait_for_text("Human terminal key");
+    tui.send_text("v");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !tui
+        .raw_transcript()
+        .windows("snx1.human.".len())
+        .any(|window| window == b"snx1.human.")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a 80x24 terminal shows the whole key: {}",
+            tui.text()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tui.send_text("x");
+    tui.wait_for_text("Human terminal key");
+    // Quit at a size where the focus footer is visible.
+    tui.resize(ROWS, COLS);
+    tui.wait_for_text("focus: pairing");
+    tui.quit();
+}
+
+#[test]
 fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() {
     let fixture = Fixture::new();
     let path = fixture.device.path.clone();
@@ -148,28 +237,136 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     click_text(&mut tui, "[ Share: off ]");
     tui.wait_for_text("focus: pairing");
     tui.wait_for_text("Firewall and router settings");
+    // The normal view shows two distinct, labelled sharing keys.
+    tui.wait_for_text("Human terminal key");
+    tui.wait_for_text("MCP/AI key");
+    tui.wait_until("both key prefixes on screen", |text| {
+        text.contains("snx1.human.") && text.contains("snx1.ai.")
+    });
+    assert!(
+        !fixture.settings_text().contains("snx1."),
+        "the settings file never holds a sharing key"
+    );
+
+    // A hard-wrapped key cannot be selected without line breaks, so `c` and
+    // `C` ask the terminal to copy the complete unchanged strings.
+    tui.send_text("c");
+    wait_for_copied_key(&mut tui, "snx1.human.");
+    tui.send_text("C");
+    wait_for_copied_key(&mut tui, "snx1.ai.");
+    let copied = copied_keys(&tui.raw_transcript());
+    assert!(copied.len() >= 2, "both keys were offered for copying");
+    assert!(
+        copied.iter().all(|key| key.len() > 300),
+        "a copied key is the complete string, not a wrapped fragment"
+    );
+    assert_ne!(
+        copied.iter().find(|key| key.starts_with("snx1.human.")),
+        copied.iter().find(|key| key.starts_with("snx1.ai."))
+    );
+
+    // When the terminal ignores OSC 52, `v` shows the complete key as one
+    // logical line that the terminal soft-wraps; copying that line does not
+    // add line breaks. Any key returns to the pairing view.
+    let human = copied
+        .iter()
+        .find(|key| key.starts_with("snx1.human."))
+        .expect("the human key was offered")
+        .clone();
+    tui.send_text("v");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let raw = tui.raw_transcript();
+        if raw
+            .windows(human.len())
+            .any(|window| window == human.as_bytes())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the soft-wrapped key was not shown"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Mouse motion must not dismiss the key before a selection is copied:
+    // the app gives the mouse to the terminal while this view is open.
+    let before_motion = tui.raw_transcript().len();
+    tui.send(b"\x1b[<35;10;5M");
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(
+        tui.raw_transcript().len(),
+        before_motion,
+        "mouse motion leaves the key view open"
+    );
+    // Shrinking the pane while the key is shown must not clip it either.
+    let before_resize = tui.raw_transcript().len();
+    tui.resize(10, 40);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        !tui.raw_transcript()[before_resize..]
+            .windows(human.len())
+            .any(|window| window == human.as_bytes()),
+        "a shrunken pane does not redraw a clipped key"
+    );
+    tui.resize(ROWS, COLS);
+    std::thread::sleep(Duration::from_millis(200));
+    tui.send_text("x");
+    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("Human terminal key");
+
+    // `a` shows the older host fields a terminal without keys needs.
+    tui.send_text("a");
+    tui.wait_for_text("Older host fields");
     tui.wait_for_text("certificate SHA-256");
-    // The CA certificate is long: the credentials are below it.
+    // The CA certificate is long: the separate credentials are below it.
     for _ in 0..60 {
         tui.send(b"\x1b[B");
         std::thread::sleep(Duration::from_millis(15));
     }
-    tui.wait_for_text("Human terminal pairing");
-    tui.wait_for_text("MCP (AI) pairing");
-    assert!(
-        tui.text().contains("credential:"),
-        "both credentials are shown to the host"
-    );
+    tui.wait_until("the separate credentials", |text| {
+        text.contains("human credential") && text.contains("MCP (AI) credential")
+    });
+    tui.send_text("a");
+    tui.wait_for_text("Human terminal key");
     assert!(
         !fixture.settings_text().contains("credential"),
         "the settings file never holds a pairing secret"
     );
 
-    // The pairing screen survives a narrow resize and `s` stops the session.
-    tui.resize(20, 40);
-    tui.wait_until("the pairing view at a narrow width", |text| {
-        text.contains("stop sharing") || text.contains("Sharing")
+    // A pane too short for the whole soft-wrapped line is refused rather
+    // than clipped or written to disk. Enlarging it makes v work again.
+    tui.resize(10, 40);
+    tui.wait_until("the pairing view redrawn at a narrow width", |text| {
+        !text.contains("Esc back")
     });
+    let narrow_offset = tui.raw_transcript().len();
+    tui.send_text("v");
+    tui.wait_for_text("pane is too short");
+    assert!(
+        !tui.raw_transcript()[narrow_offset..]
+            .windows(human.len())
+            .any(|window| window == human.as_bytes()),
+        "a too-small pane shows no clipped key"
+    );
+    tui.resize(ROWS, COLS);
+    tui.wait_for_text("focus: pairing");
+    tui.send_text("v");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !tui.raw_transcript()[narrow_offset..]
+        .windows(human.len())
+        .any(|window| window == human.as_bytes())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the whole key is shown after enlarging"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tui.send_text("x");
+    tui.wait_for_text("focus: pairing");
+
+    // The pairing screen survives a narrow resize and `s` stops the session.
     tui.resize(ROWS, COLS);
     tui.wait_for_text("focus: pairing");
     tui.send_text("s");
@@ -284,4 +481,34 @@ fn quitting_the_owner_terminal_closes_the_listener_without_stopping_first() {
             Ok(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// A large paste often arrives in the same kernel read as the keys typed just
+/// before it, with more paste bytes left beyond the 1024-byte read buffer.
+/// crossterm's default mio reader used edge-triggered readiness and returned
+/// after the first parsed event, stranding the rest until another wakeup; the
+/// following Esc was never read and the form stayed open. The `use-dev-tty`
+/// reader is level-triggered and drains the terminal, so the whole paste and
+/// the Esc that follows are processed without any delay or extra keystroke.
+#[test]
+fn a_large_paste_and_the_key_after_it_are_processed_without_another_wakeup() {
+    let fixture = Fixture::new();
+    let mut tui = fixture.tui();
+    tui.wait_for_text("focus: sidebar");
+    tui.send_text("m");
+    tui.wait_for_text("Configure MCP pairing");
+    tui.send_text("127.0.0.1");
+    tui.send(support::tui::KEY_TAB);
+    tui.send_text("7331");
+    tui.send(support::tui::KEY_TAB);
+    // One write: opener, a key longer than the reader's 1024-byte buffer, end
+    // marker. No settle delay.
+    let key = format!("snx1.ai.{}", "A".repeat(2_000));
+    tui.send(format!("\x1b[200~{key}\x1b[201~").as_bytes());
+    // The next input must be read too; otherwise the form never closes.
+    tui.send(support::tui::KEY_ESC);
+    tui.wait_until("the form to close after the paste", |text| {
+        text.contains("focus: sidebar")
+    });
+    tui.quit();
 }

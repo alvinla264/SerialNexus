@@ -128,15 +128,20 @@ the file, then performs the paired TLS connection itself:
 
 1. On the host, open terminal Settings and choose the detected devices to
    share, save, and start sharing. Press `p` with the sidebar focused to open
-   the owner-only Pairing view; read the endpoint, CA certificate,
-   certificate fingerprint and **MCP credential** there. These details are
-   created for this session only. See
-   [`docs/sharing.md`](../../docs/sharing.md) for the core contract.
-2. create `~/.config/serial-nexus/mcp-peers.json` (`$XDG_CONFIG_HOME` is
-   honoured, and `SERIAL_NEXUS_MCP_PEERS` names another file; if that override
-   is relative, it is resolved against the MCP process's working directory; if
-   no path can be configured, the server says so instead of reading a relative
-   default file) with mode `600`:
+   the owner-only Pairing view; it shows the bound address and an **MCP/AI
+   sharing key**. Treat that key as a password; it is created for this session
+   only. See [`docs/sharing.md`](../../docs/sharing.md) for the core contract.
+2. On this machine, start `serial-nexus-terminal`, focus the sidebar and press
+   `m`. Enter the host's address and port, paste the MCP/AI key, and press
+   `Enter`. The terminal saves the entry to the default pairing file
+   (`$XDG_CONFIG_HOME/serial-nexus/mcp-peers.json`, else
+   `~/.config/serial-nexus/mcp-peers.json`) with mode `600`, preserving every
+   other endpoint. If the endpoint is already paired, press `Enter` again to
+   replace it or `Esc` to cancel. Saving never connects or changes sharing.
+   A hand-written file still works; `SERIAL_NEXUS_MCP_PEERS` names another
+   file (if that override is relative, it is resolved against the MCP
+   process's working directory; if no path can be configured, the server says
+   so instead of reading a relative default file). To write it by hand:
 
 ```sh
 install -d -m 700 ~/.config/serial-nexus
@@ -173,8 +178,9 @@ $EDITOR ~/.config/serial-nexus/mcp-peers.json
   argument (for example `"fe80::20%3"`). Keep the host's pairing address and
   `host_name` as shown; their host-local scope is not used to choose the
   connecting interface.
-- Use the **AI** credential (`"role": "ai"`) for this server. A human
-  credential is refused: the role is enforced by the host, not chosen here.
+- Use the **AI** key and credential (`"role": "ai"`) for this server. A human
+  key or credential is refused by the terminal's form and by the host: the role
+  is enforced, not chosen here.
 - The file must be a regular file owned by you with no group or world
   permission bits; a symbolic link, another owner, or mode `644` is refused
   with a message that says which rule failed. The file contents are never

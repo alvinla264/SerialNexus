@@ -15,10 +15,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use serial_nexus_protocol::SharingKey;
+
 use crate::screen::{Color, Style};
 use crate::state::{
-    AppState, ConnectField, EndpointId, Focus, SettingsRow, Severity, SidebarButton, SidebarRow,
-    View, LOCAL_ENDPOINT,
+    AppState, ConnectField, EndpointId, Focus, FormMode, McpField, SettingsRow, Severity,
+    SidebarButton, SidebarRow, View, LOCAL_ENDPOINT,
 };
 
 /// The sidebar's preferred narrowest width when both panes are shown.
@@ -452,6 +454,7 @@ fn draw_right(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16,
         View::Settings => draw_settings(state, buffer, area),
         View::Pairing => draw_pairing(state, buffer, area),
         View::Connect => draw_connect(state, buffer, area),
+        View::McpPair => draw_mcp_pair(state, buffer, area),
     }
 }
 
@@ -500,6 +503,7 @@ fn draw_header(state: &AppState, buffer: &mut Buffer, area: Rect) {
         (Focus::Right, View::Scrollback) => "focus: scrollback",
         (Focus::Right, View::Pairing) => "focus: pairing",
         (Focus::Right, View::Connect) => "focus: connect",
+        (Focus::Right, View::McpPair) => "focus: MCP pairing",
     };
 
     let brand = " SerialNexus ";
@@ -854,6 +858,10 @@ fn draw_settings(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u
 
 /// The pairing view's text, before wrapping. Bounded and secret-bearing: only
 /// the owner's pairing view draws it.
+///
+/// The normal view shows two labelled, distinct sharing keys, one per role.
+/// The advanced view shows the separate host certificate, fingerprint and
+/// credentials an older terminal needs. Neither is ever written anywhere.
 fn pairing_lines(state: &AppState) -> Vec<String> {
     let Some(pairing) = &state.sharing.pairing else {
         return Vec::new();
@@ -873,23 +881,48 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
         ),
         "Firewall and router settings decide who can reach this address; this terminal only listens on it.".to_string(),
         String::new(),
-        "Host authentication (enter this on the remote terminal):".to_string(),
-        format!("  host name: {}", pairing.host.host_name),
-        format!(
+    ];
+    if state.pairing_advanced {
+        lines.push("Older host fields (for terminals without sharing keys):".to_string());
+        lines.push(format!("  host name: {}", pairing.host.host_name));
+        lines.push(format!(
             "  certificate SHA-256: {}",
             pairing.host.host_cert_fingerprint_sha256
-        ),
-        "  CA certificate (base64 DER):".to_string(),
-    ];
-    for chunk in pairing.host.ca_cert_der_b64.as_bytes().chunks(72) {
-        lines.push(format!("    {}", String::from_utf8_lossy(chunk)));
+        ));
+        lines.push("  CA certificate (base64 DER):".to_string());
+        for chunk in pairing.host.ca_cert_der_b64.as_bytes().chunks(72) {
+            lines.push(format!("    {}", String::from_utf8_lossy(chunk)));
+        }
+        lines.push(String::new());
+        lines.push("  human credential:".to_string());
+        lines.push(format!("    {}", pairing.human.credential));
+        lines.push(String::new());
+        lines.push("  MCP (AI) credential:".to_string());
+        lines.push(format!("    {}", pairing.ai.credential));
+    } else {
+        match (
+            SharingKey::encode(&pairing.host, &pairing.human),
+            SharingKey::encode(&pairing.host, &pairing.ai),
+        ) {
+            (Ok(human), Ok(ai)) => {
+                lines.push(
+                    "Human terminal key (with the address and port, into another terminal's Connect form):"
+                        .to_string(),
+                );
+                lines.push(format!("  {human}"));
+                lines.push(String::new());
+                lines.push(
+                    "MCP/AI key (with the address and port, into this terminal's MCP pairing form):"
+                        .to_string(),
+                );
+                lines.push(format!("  {ai}"));
+            }
+            _ => lines.push(
+                "Sharing keys are unavailable for this session; press a for the older host fields."
+                    .to_string(),
+            ),
+        }
     }
-    lines.push(String::new());
-    lines.push("Human terminal pairing:".to_string());
-    lines.push(format!("  credential: {}", pairing.human.credential));
-    lines.push(String::new());
-    lines.push("MCP (AI) pairing:".to_string());
-    lines.push(format!("  credential: {}", pairing.ai.credential));
     lines.push(String::new());
     if checked.is_empty() {
         lines.push("Shared devices: none".to_string());
@@ -900,8 +933,23 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
         }
     }
     lines.push(String::new());
-    lines.push("Secrets are shown only here and are never saved or sent to a device.".to_string());
-    lines.push("Esc back · s stops sharing · ↑/↓ scroll".to_string());
+    lines.push(
+        "Each key is a password: it is shown only here, is never saved or sent to a device, and stops working when sharing stops."
+            .to_string(),
+    );
+    lines.push(
+        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key."
+            .to_string(),
+    );
+    lines.push(
+        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key. Enlarge the pane first if it is too short for the whole line."
+            .to_string(),
+    );
+    if state.pairing_advanced {
+        lines.push("Esc back · a hide older fields · s stops sharing · ↑/↓ scroll".to_string());
+    } else {
+        lines.push("Esc back · a older host fields · s stops sharing · ↑/↓ scroll".to_string());
+    }
 
     lines
 }
@@ -976,51 +1024,105 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     pieces
 }
 
-/// The remote-connect form: address, port and the host's pairing information.
-/// The credential is masked; nothing here is written anywhere.
+/// The remote-connect form: address, port and one sharing key in its normal
+/// mode, or the older host fields in advanced mode. The key and credential are
+/// masked; nothing here is written anywhere.
 fn draw_connect(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16, u16)> {
     let Some(form) = &state.connect else {
         put(buffer, area, 1, "Press c or use the Connect button.", dim());
         return Some((area.x + 1, area.y));
     };
+    let title = match form.mode {
+        FormMode::Key => " Connect · sharing key ",
+        FormMode::Advanced => " Connect · older host fields (Ctrl+A for a key) ",
+    };
+    let fields: Vec<(ConnectField, &'static str, String)> = form
+        .fields()
+        .iter()
+        .map(|field| (*field, field.name(), form.value(*field)))
+        .collect();
+    draw_form(
+        state,
+        buffer,
+        area,
+        title,
+        &fields,
+        form.field,
+        form.error.as_deref(),
+    )
+}
+
+/// The MCP/AI pairing form: address, port and one AI sharing key, saved to the
+/// owner-only pairing file. The key is masked and never dialled from here.
+fn draw_mcp_pair(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16, u16)> {
+    let Some(form) = &state.mcp_pair else {
+        put(
+            buffer,
+            area,
+            1,
+            "Press m in the sidebar to configure an MCP pairing.",
+            dim(),
+        );
+        return Some((area.x + 1, area.y));
+    };
+    let fields: Vec<(McpField, &'static str, String)> = McpField::ALL
+        .iter()
+        .map(|field| (*field, field.name(), form.value(*field)))
+        .collect();
+    draw_form(
+        state,
+        buffer,
+        area,
+        " Configure MCP pairing · saved to mcp-peers.json ",
+        &fields,
+        form.field,
+        form.error.as_deref(),
+    )
+}
+
+/// Draw one labelled form, keeping the active field visible at every size.
+fn draw_form<F: PartialEq + Copy>(
+    state: &AppState,
+    buffer: &mut Buffer,
+    area: Rect,
+    title: &str,
+    fields: &[(F, &'static str, String)],
+    selected_field: F,
+    error: Option<&str>,
+) -> Option<(u16, u16)> {
     let available = area.height as usize;
     if available == 0 || area.width == 0 {
         return None;
     }
-    let show_error = form.error.is_some() && available >= 2;
+    let show_error = error.is_some() && available >= 2;
     // Keep the active field visible at every size. The title yields first,
     // then the error row; at least one row is reserved for editable content.
     let show_title = available >= 2 + usize::from(show_error);
     let title_rows = usize::from(show_title);
     if show_title {
         let title_style = focus_title_style(state.focus == Focus::Right);
-        put(buffer, area, 0, " Connect to a remote host ", title_style);
+        put(buffer, area, 0, title, title_style);
     }
     let error_rows = usize::from(show_error);
     let visible = available.saturating_sub(title_rows + error_rows).max(1);
     let mut cursor = None;
-    let selected_index = ConnectField::ALL
+    let selected_index = fields
         .iter()
-        .position(|field| *field == form.field)
+        .position(|(field, _, _)| *field == selected_field)
         .unwrap_or(0);
-    let first = selected_index
+    let first_visible = selected_index
         .saturating_sub(visible - 1)
-        .min(ConnectField::ALL.len().saturating_sub(visible));
-    for (index, field) in ConnectField::ALL
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(visible)
+        .min(fields.len().saturating_sub(visible));
+    for (offset, (field, label, value)) in
+        fields.iter().enumerate().skip(first_visible).take(visible)
     {
-        let offset = index - first + title_rows;
-        let selected = *field == form.field;
-        let value = form.value(*field);
-        let label = field.name();
+        let selected = *field == selected_field;
+        let row_offset = offset - first_visible + title_rows;
         let marker = if selected { "▸" } else { " " };
-        let line = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+        let line = Rect::new(area.x, area.y + row_offset as u16, area.width, 1);
         let width = area.width as usize;
         let full_label = format!("{marker} {label}");
-        let text = row_text(&full_label, &value, width, RowOverflow::Tail);
+        let text = row_text(&full_label, value, width, RowOverflow::Tail);
         put(buffer, line, 0, &text, highlighted(selected));
         if selected {
             let column = display_width(&text).min(width as u16).saturating_sub(1);
@@ -1028,7 +1130,7 @@ fn draw_connect(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u1
         }
     }
     if show_error {
-        if let Some(error) = &form.error {
+        if let Some(error) = error {
             put(
                 buffer,
                 Rect::new(
@@ -1186,7 +1288,7 @@ fn draw_status(state: &AppState, buffer: &mut Buffer, area: Rect) -> bool {
 fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
     let hints: String = match (state.focus, state.view) {
         (Focus::Sidebar, _) => {
-            " ↑/↓ · Enter/dbl-click open · b scroll · d disconnect · Ctrl+] right · Ctrl+Q quit "
+            " ↑/↓ · Enter/dbl-click open · b scroll · d disconnect · m MCP pair · Ctrl+] right · Ctrl+Q quit "
                 .to_string()
         }
         (Focus::Right, View::Stream) => {
@@ -1201,10 +1303,14 @@ fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
             " Ctrl+S save · Esc cancel · Tab/↑↓ move · Space/Enter toggle or edit ".to_string()
         }
         (Focus::Right, View::Pairing) => {
-            " ↑/↓ scroll · s stop sharing · Esc back to the stream ".to_string()
+            " ↑/↓ scroll · c/C copy · v/V select-copy · a older details · s stop · Esc back "
+                .to_string()
         }
         (Focus::Right, View::Connect) => {
-            " Tab/↑↓ field · Enter connects · Esc cancels ".to_string()
+            " Tab/↑↓ field · Ctrl+A older-host fields · Enter connects · Esc cancels ".to_string()
+        }
+        (Focus::Right, View::McpPair) => {
+            " Tab/↑↓ field · Enter saves to the pairing file · Esc cancels ".to_string()
         }
     };
     put(buffer, area, 0, &hints, dim());

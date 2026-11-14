@@ -41,6 +41,37 @@ a `RemoteAuth` frame inside TLS:
 - `human` and `ai`: two distinct random 256-bit credentials, each with its
   `PairingRole`.
 
+### Sharing keys
+
+For the normal pairing experience the terminal bundles the existing values
+into one copy-and-paste **sharing key**, one per role:
+
+```
+snx1.<human|ai>.<base64url-nopad JSON>
+```
+
+The JSON payload carries `v` (format version), `r` (role), `h` (the host's TLS
+name, which is its bind IP as canonical text), `c` (the CA certificate, base64
+DER), `f` (the pinned leaf SHA-256, 64 lowercase hex) and `k` (that role's
+credential). The address and port are entered by the receiving person and are
+not in the key, so an endpoint can be paired with a host whose certificate the
+key pins.
+
+`SharingKey::parse` (in `serial-nexus-protocol`) is strict: at most
+`MAX_SHARING_KEY_BYTES` (4096), ASCII with no inner whitespace, exactly three
+dot-separated parts, version `snx1`, a known role, canonical unpadded base64url,
+a bounded payload with no unknown fields, and every field validated as above.
+`parse_for(role)` refuses the other role. Surrounding whitespace from a paste is
+trimmed; a malformed, oversized, wrong-role or stale key is an error whose
+message never contains the key or its credential.
+
+Keys are session-only. They are derived from the session's host certificate and
+credentials, so stopping or restarting sharing produces different keys and old
+ones fail the TLS trust/pin check (or authentication). The wire protocol is
+unchanged: a key only encodes values that `RemoteAuth` and the TLS pin already
+use, so older hosts and clients keep working with the older separate fields.
+The pairing view's Advanced toggle (`a`) still shows those fields on a new host.
+
 Each session generates a fresh certificate authority and a leaf certificate
 for the bind address. A remote client must:
 

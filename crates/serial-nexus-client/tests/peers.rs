@@ -271,3 +271,206 @@ fn a_symbolic_link_loop_in_a_parent_directory_is_an_io_error_not_a_link() {
     assert!(!matches!(error, PeerError::NotRegular { .. }), "{error}");
     assert!(error.to_string().contains("peers.json"), "{error}");
 }
+
+mod saving {
+    use super::*;
+    use serial_nexus_client::{save_peer, PairedHost, PairingSecret, PeerSave};
+
+    fn paired(address: &str, port: u16) -> PairedHost {
+        PairedHost {
+            address: SocketAddr::new(address.parse().expect("ip"), port),
+            host_name: address.to_string(),
+            ca_cert_der_b64: "Y2E=".to_string(),
+            host_cert_fingerprint_sha256: "ab".repeat(32),
+        }
+    }
+
+    fn secret(role: PairingRole, credential: &str) -> PairingSecret {
+        PairingSecret {
+            role,
+            credential: credential.to_string(),
+        }
+    }
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    fn names(directory: &TempDir) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory.path())
+            .expect("read dir")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_new_endpoint_is_added_and_every_other_entry_is_kept() {
+        let directory = TempDir::new().expect("tempdir");
+        let existing = RemoteEndpoint::new("192.0.2.11".parse().unwrap(), 7000);
+        let path = write_file(&directory, &peer_json("192.0.2.11", 7000, "ai"), 0o600);
+        let added = RemoteEndpoint::new("192.0.2.10".parse().unwrap(), 7001);
+        let outcome = save_peer(
+            &path,
+            added,
+            paired("192.0.2.10", 7001),
+            secret(PairingRole::Ai, "bmV3LWNyZWRlbnRpYWw"),
+            false,
+        )
+        .expect("save");
+        assert_eq!(outcome, PeerSave::Added);
+        assert_eq!(mode_of(&path), 0o600, "the file stays owner-only");
+        assert_eq!(names(&directory), vec!["mcp-peers.json"]);
+
+        let peers = Peers::load(&path).expect("load");
+        assert_eq!(peers.len(), 2);
+        assert_eq!(
+            peers.find(&existing).expect("old entry").secret.credential,
+            CREDENTIAL,
+            "the existing endpoint is untouched"
+        );
+        assert_eq!(
+            peers.find(&added).expect("new entry").secret.credential,
+            "bmV3LWNyZWRlbnRpYWw"
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_created_owner_only() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("nested/serial-nexus/mcp-peers.json");
+        let endpoint = RemoteEndpoint::new("127.0.0.1".parse().unwrap(), 7443);
+        let outcome = save_peer(
+            &path,
+            endpoint,
+            paired("127.0.0.1", 7443),
+            secret(PairingRole::Ai, CREDENTIAL),
+            false,
+        )
+        .expect("create");
+        assert_eq!(outcome, PeerSave::Added);
+        assert_eq!(mode_of(&path), 0o600);
+        assert!(Peers::load(&path).expect("load").find(&endpoint).is_ok());
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"version\": 1"), "{text}");
+    }
+
+    #[test]
+    fn an_existing_endpoint_needs_replace_and_leaves_the_file_alone_otherwise() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = write_file(&directory, &peer_json("192.0.2.10", 7000, "ai"), 0o600);
+        let before = std::fs::read(&path).expect("read");
+        let endpoint = RemoteEndpoint::new("192.0.2.10".parse().unwrap(), 7000);
+        let error = save_peer(
+            &path,
+            endpoint,
+            paired("192.0.2.10", 7000),
+            secret(PairingRole::Ai, "cmVwbGFjZW1lbnQ"),
+            false,
+        )
+        .expect_err("no silent replacement");
+        assert!(matches!(error, PeerError::Exists { .. }), "{error}");
+        assert!(!error.to_string().contains(CREDENTIAL), "{error}");
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+
+        assert_eq!(
+            save_peer(
+                &path,
+                endpoint,
+                paired("192.0.2.10", 7000),
+                secret(PairingRole::Ai, "cmVwbGFjZW1lbnQ"),
+                true,
+            )
+            .expect("replace"),
+            PeerSave::Replaced
+        );
+        let peers = Peers::load(&path).expect("load");
+        assert_eq!(
+            peers.find(&endpoint).expect("entry").secret.credential,
+            "cmVwbGFjZW1lbnQ"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_changes_nothing_and_leaves_no_staging_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TempDir::new().expect("tempdir");
+        let path = write_file(&directory, &peer_json("192.0.2.10", 7000, "ai"), 0o600);
+        let before = std::fs::read(&path).expect("read");
+        let mut locked = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(directory.path(), locked.clone()).expect("lock dir");
+        let error = save_peer(
+            &path,
+            RemoteEndpoint::new("192.0.2.12".parse().unwrap(), 7000),
+            paired("192.0.2.12", 7000),
+            secret(PairingRole::Ai, "ZmFpbGVkLXNhdmU"),
+            true,
+        )
+        .expect_err("the directory refuses the staging file");
+        locked = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(directory.path(), locked).expect("unlock dir");
+
+        assert!(!error.to_string().contains("ZmFpbGVkLXNhdmU"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert_eq!(names(&directory), vec!["mcp-peers.json"]);
+    }
+
+    #[test]
+    fn an_insecure_existing_file_or_a_symlink_is_refused_without_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = TempDir::new().expect("tempdir");
+        let link = directory.path().join("mcp-peers.json");
+        let target = directory.path().join("real.json");
+        std::fs::write(&target, peer_json("127.0.0.1", 7443, "ai")).expect("target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        let before = std::fs::read(&target).expect("read");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let error = save_peer(
+            &link,
+            RemoteEndpoint::new("127.0.0.2".parse().unwrap(), 7443),
+            paired("127.0.0.2", 7443),
+            secret(PairingRole::Ai, "bGlua2Vk"),
+            true,
+        )
+        .expect_err("a symlink is refused");
+        assert!(matches!(error, PeerError::NotRegular { .. }), "{error}");
+        assert_eq!(std::fs::read(&target).expect("read"), before);
+
+        // A private target with unsafe mode is refused by the load path too.
+        std::fs::remove_file(&link).expect("remove link");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let error = save_peer(
+            &target,
+            RemoteEndpoint::new("127.0.0.2".parse().unwrap(), 7443),
+            paired("127.0.0.2", 7443),
+            secret(PairingRole::Ai, "dW5zYWZl"),
+            true,
+        )
+        .expect_err("an unsafe existing file is refused");
+        assert!(error.to_string().contains("permission"), "{error}");
+        assert_eq!(std::fs::read(&target).expect("read"), before);
+    }
+
+    #[test]
+    fn a_wrong_role_or_mismatched_pairing_is_refused_before_writing() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("mcp-peers.json");
+        let error = save_peer(
+            &path,
+            RemoteEndpoint::new("127.0.0.1".parse().unwrap(), 7443),
+            paired("127.0.0.2", 7443),
+            secret(PairingRole::Ai, CREDENTIAL),
+            false,
+        )
+        .expect_err("the pairing names another host");
+        assert!(!error.to_string().contains(CREDENTIAL), "{error}");
+        assert!(!path.exists(), "nothing was written");
+        assert_eq!(names(&directory), Vec::<String>::new());
+    }
+}
