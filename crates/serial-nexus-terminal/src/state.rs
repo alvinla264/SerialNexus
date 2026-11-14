@@ -488,9 +488,12 @@ impl ConnectForm {
     }
 
     pub fn backspace(&mut self) {
+        let is_key = self.field == ConnectField::Key;
         let field = self.field.text_mut(self);
         field.pop();
-        if field.is_empty() {
+        // Only clearing the key itself starts the key over; editing another
+        // field must not hide a malformed key that was already rejected.
+        if is_key && field.is_empty() {
             self.key_invalid = false;
         }
         self.error = None;
@@ -662,9 +665,11 @@ impl McpPairForm {
     }
 
     pub fn backspace(&mut self) {
+        let is_key = self.field == McpField::Key;
         let field = self.field.text_mut(self);
         field.pop();
-        if field.is_empty() {
+        // Only clearing the key itself starts the key over.
+        if is_key && field.is_empty() {
             self.key_invalid = false;
         }
         self.error = None;
@@ -2693,6 +2698,34 @@ mod sharing_tests {
         assert!(!mcp.confirm_replace);
         mcp.push_str("snx1.ai.a b");
         assert_eq!(mcp.key, "snx1.ai.abc");
+    }
+
+    #[test]
+    fn editing_another_field_does_not_clear_a_rejected_key() {
+        let mut connect = ConnectForm::new();
+        connect.field = ConnectField::Key;
+        connect.push(' ');
+        assert!(connect.key_invalid);
+        connect.field = ConnectField::Port;
+        connect.backspace();
+        assert!(
+            connect.key_invalid,
+            "editing the port must not hide a rejected key"
+        );
+        connect.field = ConnectField::Key;
+        connect.backspace();
+        assert!(!connect.key_invalid, "clearing the key starts it over");
+
+        let mut mcp = McpPairForm::new();
+        mcp.field = McpField::Key;
+        mcp.push('\u{00a0}');
+        assert!(mcp.key_invalid);
+        mcp.field = McpField::Address;
+        mcp.backspace();
+        assert!(mcp.key_invalid);
+        mcp.field = McpField::Key;
+        mcp.backspace();
+        assert!(!mcp.key_invalid);
     }
 
     #[test]
