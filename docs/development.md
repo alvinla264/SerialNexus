@@ -146,8 +146,14 @@ Further terminal coverage uses real core/client seams and dedicated PTY flows:
 - `remote_controls.rs`: authenticated Connect, certificate mismatch, several
   endpoint groups, same-path isolation, a remote session's focus, scrollback
   and resize, unplug/disconnect notices, and remote write failures.
+- `pairing_keys.rs`: the versioned sharing-key codec's strict role/host checks,
+  a human key connecting to a real core, an old key refused after rotation, the
+  older advanced fields, and the MCP pairing form's add/replace/cancel and
+  failed-save paths preserving every other entry.
 - `pty_sharing.rs` and `pty_remote.rs`: the actual rendered and keyboard-driven
-  Share/Pairing and Connect workflows, including device access on the host.
+  Share/Pairing and Connect workflows, including both labelled keys, the
+  advanced toggle, a whole long key pasted as one bracketed paste, and device
+  access on the host.
 - `pty_remote_mcp.rs`: the real MCP binary reaching a remote host through the
   real terminal's gateway, beside two more human clients on the same device:
   discovery and first-open baud on a checked but unopened port, whole
@@ -158,7 +164,8 @@ Further terminal coverage uses real core/client seams and dedicated PTY flows:
   after re-sharing, uncheck revocation, rotated credentials, no fallback when
   the gateway exits, and a pairing-value search over the complete MCP
   stdout/stderr and terminal PTY transcripts (including shutdown output, with
-  control sequences and wrapping removed).
+  control sequences and wrapping removed), and the terminal's own MCP pairing
+  form writing the default owner-only file that the real MCP server then uses.
 
 `serial-nexus-mcp` additionally has end-to-end tests over real MCP stdio framing:
 handshake and tool listing, protocol errors, default and joined baud, rejected

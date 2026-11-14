@@ -41,9 +41,11 @@ pub enum View {
     /// The owner's pairing information for the running sharing session. The
     /// secrets in it exist only in memory and are drawn only here.
     Pairing,
-    /// The form that asks for a remote host's address, port and pairing
-    /// information.
+    /// The form that asks for a remote host's address, port and sharing key.
     Connect,
+    /// The form that writes one endpoint's MCP/AI pairing into the private
+    /// pairing file. It never connects or changes sharing.
+    McpPair,
 }
 
 /// The settings rows before the detected-device checklist: local echo,
@@ -318,18 +320,31 @@ impl SessionKey {
     }
 }
 
+/// Which fields a form shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormMode {
+    /// Address, port and one copy-and-paste sharing key.
+    Key,
+    /// The older host fields, for connecting to a host that predates keys.
+    Advanced,
+}
+
 /// One field of the remote-connect form, in drawing order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectField {
     Address,
     Port,
+    Key,
     Ca,
     Fingerprint,
     Credential,
 }
 
 impl ConnectField {
-    pub const ALL: [Self; 5] = [
+    /// The fields of the normal form: address, port and the human key.
+    pub const NORMAL: [Self; 3] = [Self::Address, Self::Port, Self::Key];
+    /// The fields of the older-host form.
+    pub const ADVANCED: [Self; 5] = [
         Self::Address,
         Self::Port,
         Self::Ca,
@@ -337,10 +352,18 @@ impl ConnectField {
         Self::Credential,
     ];
 
+    pub fn fields(mode: FormMode) -> &'static [Self] {
+        match mode {
+            FormMode::Key => &Self::NORMAL,
+            FormMode::Advanced => &Self::ADVANCED,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Address => "Host address",
             Self::Port => "Port",
+            Self::Key => "Human sharing key",
             Self::Ca => "CA certificate (base64 DER)",
             Self::Fingerprint => "Host certificate SHA-256",
             Self::Credential => "Human pairing credential",
@@ -351,6 +374,7 @@ impl ConnectField {
         match self {
             Self::Address => &mut form.address,
             Self::Port => &mut form.port,
+            Self::Key => &mut form.key,
             Self::Ca => &mut form.ca,
             Self::Fingerprint => &mut form.fingerprint,
             Self::Credential => &mut form.credential,
@@ -359,12 +383,16 @@ impl ConnectField {
 }
 
 /// The remote-connect form. Every value is memory-only: nothing here is
-/// written to the settings file, logged, or sent to a device.
+/// written to the settings file, logged, or sent to a device. The sharing key
+/// is password-equivalent, so it is masked like a credential and never saved.
 pub struct ConnectForm {
+    /// The normal (address, port, key) or older-host (advanced) fields.
+    pub mode: FormMode,
     /// The field that takes typed text.
     pub field: ConnectField,
     pub address: String,
     pub port: String,
+    pub key: String,
     pub ca: String,
     pub fingerprint: String,
     pub credential: String,
@@ -374,9 +402,11 @@ pub struct ConnectForm {
 impl ConnectForm {
     pub fn new() -> Self {
         Self {
+            mode: FormMode::Key,
             field: ConnectField::Address,
             address: String::new(),
             port: String::new(),
+            key: String::new(),
             ca: String::new(),
             fingerprint: String::new(),
             credential: String::new(),
@@ -384,30 +414,54 @@ impl ConnectForm {
         }
     }
 
-    /// What the form shows for one field. The credential is masked.
+    /// What the form shows for one field. The key and credential are masked.
     pub fn value(&self, field: ConnectField) -> String {
         match field {
             ConnectField::Address => self.address.clone(),
             ConnectField::Port => self.port.clone(),
+            ConnectField::Key => mask(&self.key),
             ConnectField::Ca => self.ca.clone(),
             ConnectField::Fingerprint => self.fingerprint.clone(),
-            ConnectField::Credential => {
-                if self.credential.is_empty() {
-                    String::new()
-                } else {
-                    "••••••••".to_string()
-                }
-            }
+            ConnectField::Credential => mask(&self.credential),
         }
     }
 
-    pub fn push(&mut self, ch: char) {
-        if !ch.is_ascii_graphic() {
-            return;
+    /// An advanced form filled with the older host fields, for an older host.
+    pub fn advanced() -> Self {
+        Self {
+            mode: FormMode::Advanced,
+            ..Self::new()
         }
-        let field = self.field.text_mut(self);
-        if field.len() < 4096 {
-            field.push(ch);
+    }
+
+    pub fn fields(&self) -> &'static [ConnectField] {
+        ConnectField::fields(self.mode)
+    }
+
+    /// Switch between the sharing-key form and the older-host form. The
+    /// address and port carry over; the other side's entries are kept in
+    /// memory but never submitted while that mode is hidden.
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            FormMode::Key => FormMode::Advanced,
+            FormMode::Advanced => FormMode::Key,
+        };
+        self.field = ConnectField::Address;
+        self.error = None;
+    }
+
+    pub fn push(&mut self, ch: char) {
+        self.push_str(&ch.to_string());
+    }
+
+    /// Insert text as one action, as a terminal paste does. Only printable
+    /// ASCII is kept, and every field stays bounded.
+    pub fn push_str(&mut self, text: &str) {
+        for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
+            let field = self.field.text_mut(self);
+            if field.len() < MAX_FORM_FIELD_BYTES {
+                field.push(ch);
+            }
         }
         self.error = None;
     }
@@ -418,17 +472,129 @@ impl ConnectForm {
     }
 
     pub fn next_field(&mut self, delta: i32) {
-        let index = ConnectField::ALL
+        let fields = self.fields();
+        let index = fields
             .iter()
             .position(|field| *field == self.field)
             .unwrap_or(0);
-        let last = ConnectField::ALL.len() - 1;
+        let last = fields.len() - 1;
         let next = (index as i32 + delta).clamp(0, last as i32) as usize;
-        self.field = ConnectField::ALL[next];
+        self.field = fields[next];
     }
 }
 
 impl Default for ConnectForm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn mask(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        "••••••••".to_string()
+    }
+}
+
+/// Most one form field may hold. A sharing key is bounded well below this.
+pub const MAX_FORM_FIELD_BYTES: usize = 4096;
+
+/// One field of the MCP/AI pairing form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpField {
+    Address,
+    Port,
+    Key,
+}
+
+impl McpField {
+    pub const ALL: [Self; 3] = [Self::Address, Self::Port, Self::Key];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Address => "Host address",
+            Self::Port => "Port",
+            Self::Key => "MCP/AI sharing key",
+        }
+    }
+
+    fn text_mut(self, form: &mut McpPairForm) -> &mut String {
+        match self {
+            Self::Address => &mut form.address,
+            Self::Port => &mut form.port,
+            Self::Key => &mut form.key,
+        }
+    }
+}
+
+/// The form that saves one endpoint's MCP/AI pairing to the private pairing
+/// file. It never connects, requests control or enables sharing. The key stays
+/// in memory only and is written to no other place.
+pub struct McpPairForm {
+    pub field: McpField,
+    pub address: String,
+    pub port: String,
+    pub key: String,
+    pub error: Option<String>,
+    /// True once a person has been told the endpoint is already paired and
+    /// asked to press Enter again; any edit cancels that confirmation.
+    pub confirm_replace: bool,
+}
+
+impl McpPairForm {
+    pub fn new() -> Self {
+        Self {
+            field: McpField::Address,
+            address: String::new(),
+            port: String::new(),
+            key: String::new(),
+            error: None,
+            confirm_replace: false,
+        }
+    }
+
+    pub fn value(&self, field: McpField) -> String {
+        match field {
+            McpField::Address => self.address.clone(),
+            McpField::Port => self.port.clone(),
+            McpField::Key => mask(&self.key),
+        }
+    }
+
+    pub fn push(&mut self, ch: char) {
+        self.push_str(&ch.to_string());
+    }
+
+    pub fn push_str(&mut self, text: &str) {
+        for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
+            let field = self.field.text_mut(self);
+            if field.len() < MAX_FORM_FIELD_BYTES {
+                field.push(ch);
+            }
+        }
+        self.error = None;
+        self.confirm_replace = false;
+    }
+
+    pub fn backspace(&mut self) {
+        self.field.text_mut(self).pop();
+        self.error = None;
+        self.confirm_replace = false;
+    }
+
+    pub fn next_field(&mut self, delta: i32) {
+        let index = McpField::ALL
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        let last = McpField::ALL.len() - 1;
+        let next = (index as i32 + delta).clamp(0, last as i32) as usize;
+        self.field = McpField::ALL[next];
+    }
+}
+
+impl Default for McpPairForm {
     fn default() -> Self {
         Self::new()
     }
@@ -578,6 +744,10 @@ pub struct AppState {
     pub remote_labels: BTreeMap<EndpointId, String>,
     /// The remote-connect form while it is open.
     pub connect: Option<ConnectForm>,
+    /// The MCP/AI pairing form while it is open.
+    pub mcp_pair: Option<McpPairForm>,
+    /// Whether the pairing view lists the older host fields as well.
+    pub pairing_advanced: bool,
     rows: usize,
     cols: usize,
 }
@@ -611,6 +781,8 @@ impl AppState {
             sharing: SharingState::new(),
             remote_labels: BTreeMap::new(),
             connect: None,
+            mcp_pair: None,
+            pairing_advanced: false,
             rows: rows.max(1),
             cols: cols.max(1),
         }
@@ -1306,7 +1478,11 @@ impl AppState {
                 // own kept rows and scrolled position. With nothing left, the
                 // view falls back to the empty stream.
                 View::Scrollback if self.shown.is_none() => self.view = View::Stream,
-                View::Scrollback | View::Settings | View::Pairing | View::Connect => {}
+                View::Scrollback
+                | View::Settings
+                | View::Pairing
+                | View::Connect
+                | View::McpPair => {}
             }
         }
         Some(session)
@@ -2331,5 +2507,62 @@ mod sharing_tests {
         assert_eq!(state.settings_kind(4), Some(SettingsRow::Device(0)));
         assert_eq!(state.settings_kind(5), Some(SettingsRow::Device(1)));
         assert_eq!(state.settings_kind(6), None);
+    }
+
+    #[test]
+    fn the_connect_form_masks_secrets_and_pastes_a_whole_key_in_one_action() {
+        let mut form = ConnectForm::new();
+        assert_eq!(form.fields(), &ConnectField::NORMAL);
+        form.address = "192.0.2.10".into();
+        form.port = "7331".into();
+        form.field = ConnectField::Key;
+        let key = format!("snx1.human.{}", "A".repeat(120));
+        form.push_str(&key);
+        assert_eq!(form.key, key);
+        assert_eq!(form.value(ConnectField::Key), "••••••••");
+        assert!(!form.value(ConnectField::Key).contains("snx1"));
+
+        form.toggle_mode();
+        assert_eq!(form.mode, FormMode::Advanced);
+        assert_eq!(form.field, ConnectField::Address);
+        assert_eq!(form.address, "192.0.2.10", "the address carries over");
+        assert_eq!(form.port, "7331", "the port carries over");
+        assert_eq!(form.fields(), &ConnectField::ADVANCED);
+        form.toggle_mode();
+        assert_eq!(form.fields(), &ConnectField::NORMAL);
+        assert_eq!(form.key, key, "the key is kept while the mode changes");
+    }
+
+    #[test]
+    fn form_pastes_are_printable_only_and_bounded() {
+        let mut form = ConnectForm::new();
+        form.field = ConnectField::Key;
+        form.push_str("line one\nline\ttwo");
+        assert_eq!(form.key, "lineonelinetwo");
+        form.push_str(&"A".repeat(MAX_FORM_FIELD_BYTES + 100));
+        assert_eq!(form.key.len(), MAX_FORM_FIELD_BYTES);
+
+        let mut mcp = McpPairForm::new();
+        mcp.field = McpField::Key;
+        mcp.push_str("snx1.ai.abc\r\n");
+        assert_eq!(mcp.key, "snx1.ai.abc");
+        assert_eq!(mcp.value(McpField::Key), "••••••••");
+        assert!(!mcp.confirm_replace);
+    }
+
+    #[test]
+    fn editing_an_mcp_form_cancels_a_pending_replace_confirmation() {
+        let mut form = McpPairForm::new();
+        form.confirm_replace = true;
+        form.push('1');
+        assert!(
+            !form.confirm_replace,
+            "a change asks for confirmation again"
+        );
+        form.confirm_replace = true;
+        form.next_field(1);
+        assert!(form.confirm_replace, "moving fields is not an edit");
+        form.backspace();
+        assert!(!form.confirm_replace);
     }
 }

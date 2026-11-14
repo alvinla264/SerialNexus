@@ -154,11 +154,29 @@ LAN sharing and remote-client terms (the core contract is in
 - **Human credential** and **MCP credential**: the two distinct secrets a
   session generates. The core derives the remote client's role from which one
   matched; neither is persisted by the host or sent to a device.
-- **Pairing view**: the owner-only right-pane view (`p`) showing the bound
-  address, host authentication data, both credentials and the checked devices.
+- **Sharing key**: one bounded, versioned string (`snx1.<role>.<base64url>`)
+  that bundles the host name, CA certificate, pinned certificate fingerprint
+  and exactly one **pairing credential**. The role is part of the key, so a
+  human key and an MCP/AI key are distinct and cannot be used for the other
+  role. A key is password-equivalent: memory-only in the receiving terminal,
+  never logged or sent to a device, and stale keys fail once sharing restarts.
+- **Human key** and **MCP/AI key**: the two sharing keys the **pairing view**
+  shows while sharing is active. The human key goes with the address and port
+  into another terminal's **Connect form**; the AI key goes with them into the
+  **MCP pairing form**.
+- **Pairing view**: the owner-only right-pane view (`p`). Normally it shows the
+  bound address and the two distinct sharing keys; `a` toggles the **older host
+  fields** (host name, fingerprint, CA certificate and the separate raw
+  credentials) for a terminal that predates keys.
 - **Connect form**: the remote terminal's memory-only form for a host address,
-  port, CA certificate, fingerprint and human credential. A wrong certificate
-  is refused rather than trusted.
+  port and one human sharing key. `Ctrl+A` switches it to the older host fields
+  (address, port, CA certificate, fingerprint and human credential) for a host
+  that predates keys. A wrong certificate or key is refused rather than
+  trusted.
+- **MCP pairing form**: the terminal's explicit action (`m` in the sidebar) to
+  save an endpoint's address, port and AI key into the owner-only **pairing
+  file**. It never connects, requests control or changes sharing, and replacing
+  an existing endpoint asks first.
 - **Endpoint**: one connected host. `Local` is this machine's core; each
   connected remote host is a separate endpoint with its own transport and
   grouping heading. A **session key** is an endpoint plus that host's device
@@ -168,6 +186,9 @@ LAN sharing and remote-client terms (the core contract is in
 - **Pairing file**: the MCP host user's private per-endpoint file
   (`mcp-peers.json`) with one paired host and MCP pairing credential per remote
   endpoint. Readable by its owner only; never an AI tool argument or tool result.
+  The terminal's **MCP pairing form** writes it atomically, preserving every
+  other endpoint; an existing file with unsafe ownership, mode or shape is
+  refused rather than replaced.
 - **Remote session**: one MCP server's connection to one remote endpoint, with
   its own device ids, control and history, separate from the local core and
   every other endpoint.

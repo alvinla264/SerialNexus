@@ -9,19 +9,26 @@ and one real LAN address, and never flashes the board or changes firmware.
 1. The core starts beside the normal one on a private socket.
 2. A local terminal client opens the real board (local behaviour intact).
 3. Sharing starts on one concrete LAN IPv4/IPv6 address; the owner gets a
-   session, host pin and human pairing credential.
+   session, host pin and human pairing credential, and the terminal's pairing
+   view renders two distinct sharing keys that decode to those values.
 4. A remote human client pairs over TLS, verifies the host CA and pinned leaf,
-   authenticates with the human credential and derives its role from it.
+   authenticates with the credential bundled in the human sharing key and
+   derives its role from it. The older separate fields (address, port, CA,
+   fingerprint, credential) remain accepted by the advanced Connect form.
 5. Remote discovery lists the checked board, and the remote client joins it.
 6. Remote history reads real firmware output; an optional probe can be written
    and an optional firmware echo confirmed.
 7. Unchecking revokes the remote read immediately, and local serial access
    still works after sharing stops.
 
-It does not test firmware behaviour beyond what the existing firmware prints or
-echoes, the terminal UI workflow itself, or NAT/firewalls. The `serial-nexus-mcp`
-crate adds a companion ignored gate that exercises the actual MCP-over-stdio
-pairing-file path against the same existing board echo firmware.
+It runs the coordinator's exact-head acceptance for the sharing-key flow as
+well: the pairing view's two keys, a human key paired through the normal form,
+an old key failing after a sharing restart, and the terminal's MCP pairing
+action saving the AI key that the remote MCP gate then uses. It does not test
+firmware behaviour beyond what the existing firmware prints or echoes,
+NAT/firewalls, or the terminal UI beyond those pairing actions. The
+`serial-nexus-mcp` crate adds a companion ignored gate that exercises the actual
+MCP-over-stdio pairing-file path against the same existing board echo firmware.
 
 ## Prerequisites
 
@@ -72,7 +79,12 @@ Optional probe and firmware echo (only if the existing firmware echoes it):
 Expected lines: `1/7 local open`, `2/7 sharing: bind=...`, `3/7 remote pair`,
 `4/7 remote list`, `5/7 remote join`, `6/7 remote read`, `7/7 uncheck revoked
 remote access`, then `sharing stopped; local history ... lines`, and finally
-`test result: ok. 1 passed`.
+`test result: ok. 1 passed`. Then, on the same exact head, run the terminal's
+pairing acceptance in a PTY: start sharing, open `p`, confirm a human key and
+an MCP/AI key are shown; paste the human key into another terminal's Connect
+form and read the board; restart sharing and confirm the old key is refused;
+press `m` and save the AI key, then run the remote MCP stdio gate below with
+that terminal-written pairing file. Never print a key or credential.
 
 ## Remote MCP stdio gate
 
@@ -83,7 +95,8 @@ the MCP process receives `SERIAL_NEXUS_SOCKET`, `SERIAL_NEXUS_MCP_PEERS`, and
 file is created with mode `0600` in a mode `0700` directory. The test performs
 host open/share setup, remote MCP `list_devices`, `connect`, `send`, and `read`,
 checks the firmware echo, unchecks the device, verifies subsequent MCP read is
-revoked, and scans tool responses and captured MCP stderr for both credentials.
+revoked, and scans tool responses and captured MCP stderr for the sharing keys
+and both credentials.
 The host uses the canonical path from the local open result for sharing and
 checks the canonical path reported by remote discovery; a `/dev/serial/by-id`
 input may therefore appear as `/dev/ttyACM*` remotely.

@@ -2,6 +2,7 @@
 //! not depend on a real terminal.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,16 +13,36 @@ use ratatui::layout::Rect;
 use serial_nexus_client::{Client, ClientError, RemoteClient, RemoteEndpoint};
 use serial_nexus_protocol::{
     DeviceSummary, ErrorCode, Event, OpenResult, PairedHost, PairingRole, PairingSecret, ShareBind,
-    WaitSpec, WriteResult,
+    SharingKey, WaitSpec, WriteResult,
 };
 
 use crate::input::{echo_key, map_key, Action, Key};
 use crate::render::{hit_test, pairing_max_scroll, panes, settings_hit_test, Hit, SettingsHit};
 use crate::settings::{SettingsStore, TerminalSettings};
 use crate::state::{
-    short_holder, AppState, ConnectForm, DeviceEntry, EndpointId, Focus, Notice, SessionKey,
-    SidebarButton, View, LOCAL_ENDPOINT,
+    short_holder, AppState, ConnectForm, DeviceEntry, EndpointId, Focus, FormMode, McpPairForm,
+    Notice, SessionKey, SidebarButton, View, LOCAL_ENDPOINT,
 };
+
+/// Why saving an MCP pairing stopped.
+enum McpSave {
+    /// The endpoint is already paired and the person has not confirmed yet.
+    NeedsConfirmation,
+    /// A clear, secret-free reason shown in the form.
+    Failed(String),
+}
+
+/// Parse a port field into 1..=65535.
+fn parse_port(text: &str) -> Result<u16, String> {
+    let port: u16 = text
+        .trim()
+        .parse()
+        .map_err(|_| "the port is not a number from 1 to 65535".to_string())?;
+    if port == 0 {
+        return Err("the port must be between 1 and 65535".to_string());
+    }
+    Ok(port)
+}
 
 /// A disconnected or revoked remote session no longer belongs in the sidebar.
 fn remote_session_is_gone(error: &ClientError) -> bool {
@@ -145,6 +166,9 @@ pub struct App {
     remotes: Vec<RemoteLink>,
     /// The next endpoint number a remote link gets.
     next_endpoint: u64,
+    /// Where the owner-only MCP pairing file lives, if the environment names
+    /// one. Only the explicit MCP pairing action writes it.
+    peers_path: Option<PathBuf>,
 }
 
 impl App {
@@ -185,6 +209,7 @@ impl App {
             last_click: None,
             remotes: Vec::new(),
             next_endpoint: 1,
+            peers_path: serial_nexus_client::Peers::default_path().ok(),
         };
         app.refresh_devices();
         app
@@ -197,6 +222,17 @@ impl App {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Use an explicit MCP pairing file (tests, embedding). Without this the
+    /// per-user default path is used, when the environment names one.
+    pub fn set_peers_path(&mut self, path: impl Into<PathBuf>) {
+        self.peers_path = Some(path.into());
+    }
+
+    /// The MCP pairing file this launch would write, if any.
+    pub fn peers_path(&self) -> Option<&std::path::Path> {
+        self.peers_path.as_deref()
     }
 
     /// Re-read every connected host's device list. A remote host that fails
@@ -471,12 +507,20 @@ impl App {
             Action::ShareToggle => self.toggle_sharing(),
             Action::OpenPairing => self.open_pairing(),
             Action::ConnectRemote => self.start_connect(),
+            Action::ConnectToggleMode => self.connect_toggle_mode(),
             Action::ConnectChar(ch) => self.connect_push(ch),
             Action::ConnectBackspace => self.connect_backspace(),
             Action::ConnectNext(delta) => self.connect_next_field(delta),
             Action::ConnectSubmit => self.submit_connect(),
             Action::ConnectCancel => self.leave_connect(),
+            Action::McpPairRemote => self.start_mcp_pair(),
+            Action::McpChar(ch) => self.mcp_push(ch),
+            Action::McpBackspace => self.mcp_backspace(),
+            Action::McpNext(delta) => self.mcp_next_field(delta),
+            Action::McpSubmit => self.submit_mcp_pair(),
+            Action::McpCancel => self.leave_mcp_pair(),
             Action::LeavePairing => self.leave_pairing(),
+            Action::PairingToggleAdvanced => self.toggle_pairing_advanced(),
             Action::PairingScroll(delta) => self.scroll_pairing(delta),
             Action::Ignore => {}
         }
@@ -1085,6 +1129,167 @@ impl App {
         Ok(bind)
     }
 
+    /// Open the form that saves one endpoint's MCP/AI pairing. It writes only
+    /// the private pairing file: it never dials, requests control or changes
+    /// sharing.
+    pub fn start_mcp_pair(&mut self) {
+        if self.refuse_if_unsaved_settings() {
+            return;
+        }
+        self.state.prompt = None;
+        if let Some(form) = &mut self.state.mcp_pair {
+            form.error = None;
+            form.confirm_replace = false;
+        } else {
+            self.state.mcp_pair = Some(McpPairForm::new());
+        }
+        self.state.view = View::McpPair;
+        self.state.focus = Focus::Right;
+    }
+
+    fn leave_mcp_pair(&mut self) {
+        self.state.mcp_pair = None;
+        self.show_live_stream();
+        self.state.focus = Focus::Sidebar;
+    }
+
+    pub fn mcp_push(&mut self, ch: char) {
+        if let Some(form) = &mut self.state.mcp_pair {
+            form.push(ch);
+        }
+    }
+
+    pub fn mcp_backspace(&mut self) {
+        if let Some(form) = &mut self.state.mcp_pair {
+            form.backspace();
+        }
+    }
+
+    pub fn mcp_next_field(&mut self, delta: i32) {
+        if let Some(form) = &mut self.state.mcp_pair {
+            form.next_field(delta);
+        }
+    }
+
+    /// Save the AI pairing to the owner-only pairing file. An existing
+    /// endpoint needs one confirmation; cancel or any failure leaves the file
+    /// exactly as it was, including every other endpoint.
+    pub fn submit_mcp_pair(&mut self) {
+        let Some(mut form) = self.state.mcp_pair.take() else {
+            return;
+        };
+        match self.save_mcp_pair(&mut form) {
+            Ok((endpoint, path, outcome)) => {
+                self.state.mcp_pair = None;
+                self.show_live_stream();
+                self.state.focus = Focus::Sidebar;
+                let action = match outcome {
+                    serial_nexus_client::PeerSave::Added => "saved",
+                    serial_nexus_client::PeerSave::Replaced => "replaced",
+                };
+                self.state.notice = Some(Notice::info(format!(
+                    "MCP pairing {action} for {endpoint} in {}",
+                    path.display()
+                )));
+            }
+            Err(McpSave::NeedsConfirmation) => {
+                form.error = Some(
+                    "this endpoint is already paired; press Enter again to replace it, or Esc to cancel"
+                        .to_string(),
+                );
+                form.confirm_replace = true;
+                self.state.mcp_pair = Some(form);
+            }
+            Err(McpSave::Failed(error)) => {
+                form.error = Some(error);
+                self.state.mcp_pair = Some(form);
+            }
+        }
+    }
+
+    fn save_mcp_pair(
+        &self,
+        form: &mut McpPairForm,
+    ) -> Result<(RemoteEndpoint, PathBuf, serial_nexus_client::PeerSave), McpSave> {
+        let (address, scope) =
+            RemoteEndpoint::parse_address(form.address.trim()).map_err(McpSave::Failed)?;
+        let port = parse_port(&form.port).map_err(McpSave::Failed)?;
+        let key = SharingKey::parse_for(form.key.trim(), PairingRole::Ai)
+            .map_err(|error| McpSave::Failed(format!("sharing key: {error}")))?;
+        let socket = ShareBind::with_scope(address, port, scope).socket_addr();
+        let paired = key.paired_with(socket).map_err(|_| {
+            McpSave::Failed(format!(
+                "this sharing key is for {}, not {}",
+                key.host_name(),
+                address
+            ))
+        })?;
+        let endpoint = RemoteEndpoint::from_socket_addr(paired.address).canonical();
+        let path = self
+            .peers_path
+            .clone()
+            .ok_or_else(|| {
+                McpSave::Failed(
+                    "no MCP pairing file location: set XDG_CONFIG_HOME or HOME, or SERIAL_NEXUS_MCP_PEERS"
+                        .to_string(),
+                )
+            })?;
+        if !form.confirm_replace {
+            match serial_nexus_client::Peers::load_optional(&path) {
+                Ok(Some(peers)) if peers.find(&endpoint).is_ok() => {
+                    return Err(McpSave::NeedsConfirmation)
+                }
+                Ok(_) => {}
+                Err(error) => return Err(McpSave::Failed(error.to_string())),
+            }
+        }
+        let outcome = serial_nexus_client::save_peer(
+            &path,
+            endpoint,
+            paired,
+            key.secret().clone(),
+            form.confirm_replace,
+        )
+        .map_err(|error| McpSave::Failed(error.to_string()))?;
+        Ok((endpoint, path, outcome))
+    }
+
+    /// Insert pasted text where the current view takes typing. In the stream
+    /// it goes to the shown device exactly as typed keys would.
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.state.prompt.is_some() {
+            for ch in text.chars() {
+                self.handle_key(Key::Char(ch));
+            }
+            return;
+        }
+        match (self.state.focus, self.state.view) {
+            (Focus::Right, View::Connect) => self.paste_into_connect(text),
+            (Focus::Right, View::McpPair) => {
+                if let Some(form) = &mut self.state.mcp_pair {
+                    form.push_str(text);
+                }
+            }
+            (Focus::Right, View::Settings) if self.state.settings_editing => {
+                for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
+                    self.handle_key(Key::Char(ch));
+                }
+            }
+            (Focus::Right, View::Stream) => {
+                for ch in text.chars() {
+                    self.handle_key(Key::Char(ch));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Show or hide the older host fields in the pairing view.
+    fn toggle_pairing_advanced(&mut self) {
+        self.state.pairing_advanced = !self.state.pairing_advanced;
+        self.state.pairing_scroll = 0;
+    }
+
     /// Stop sharing, which revokes both credentials and disconnects every
     /// remote client. The checked selection stays for this launch only.
     pub fn stop_sharing(&mut self) {
@@ -1160,9 +1365,24 @@ impl App {
         self.state.focus = Focus::Sidebar;
     }
 
+    /// Switch the open Connect form to or from the older-host fields. The
+    /// typed address and port carry over; nothing is submitted or connected.
+    pub fn connect_toggle_mode(&mut self) {
+        if let Some(form) = &mut self.state.connect {
+            form.toggle_mode();
+        }
+    }
+
     pub fn connect_push(&mut self, ch: char) {
         if let Some(form) = &mut self.state.connect {
             form.push(ch);
+        }
+    }
+
+    /// Insert a pasted string into the focused form field in one action.
+    fn paste_into_connect(&mut self, text: &str) {
+        if let Some(form) = &mut self.state.connect {
+            form.push_str(text);
         }
     }
 
@@ -1223,37 +1443,52 @@ impl App {
     }
 
     /// Dial and authenticate one host, then register its endpoint. Every
-    /// failure leaves nothing behind.
+    /// failure leaves nothing behind. The normal form carries one sharing key
+    /// (host verification and the human credential); the advanced form keeps
+    /// the older separate fields for hosts that predate keys.
     fn connect_remote(&mut self, form: &ConnectForm) -> Result<(EndpointId, String), String> {
         let (address, scope) = RemoteEndpoint::parse_address(form.address.trim())?;
-        let port: u16 = form
-            .port
-            .trim()
-            .parse()
-            .map_err(|_| "the port is not a number from 1 to 65535".to_string())?;
-        if port == 0 {
-            return Err("the port must be between 1 and 65535".to_string());
-        }
-        let fingerprint = form.fingerprint.trim().to_ascii_lowercase();
-        if fingerprint.len() != 64 || !fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return Err("the host fingerprint is not a SHA-256 hex value".to_string());
-        }
-        if form.ca.trim().is_empty() {
-            return Err("enter the host's CA certificate from its pairing view".to_string());
-        }
-        if form.credential.trim().is_empty() {
-            return Err("enter the host's human pairing credential".to_string());
-        }
-        let host_name = address.to_string();
-        let paired = PairedHost {
-            address: ShareBind::with_scope(address, port, scope).socket_addr(),
-            host_name,
-            ca_cert_der_b64: form.ca.trim().to_string(),
-            host_cert_fingerprint_sha256: fingerprint,
-        };
-        let secret = PairingSecret {
-            role: PairingRole::Human,
-            credential: form.credential.trim().to_string(),
+        let port = parse_port(&form.port)?;
+        let (paired, secret) = match form.mode {
+            FormMode::Key => {
+                let key = SharingKey::parse_for(form.key.trim(), PairingRole::Human)
+                    .map_err(|error| format!("sharing key: {error}"))?;
+                let socket = ShareBind::with_scope(address, port, scope).socket_addr();
+                let paired = key.paired_with(socket).map_err(|_| {
+                    format!(
+                        "this sharing key is for {}, not {}",
+                        key.host_name(),
+                        address
+                    )
+                })?;
+                let secret = key.secret().clone();
+                (paired, secret)
+            }
+            FormMode::Advanced => {
+                let fingerprint = form.fingerprint.trim().to_ascii_lowercase();
+                if fingerprint.len() != 64 || !fingerprint.chars().all(|ch| ch.is_ascii_hexdigit())
+                {
+                    return Err("the host fingerprint is not a SHA-256 hex value".to_string());
+                }
+                if form.ca.trim().is_empty() {
+                    return Err("enter the host's CA certificate from its pairing view".to_string());
+                }
+                if form.credential.trim().is_empty() {
+                    return Err("enter the host's human pairing credential".to_string());
+                }
+                let host_name = address.to_string();
+                let paired = PairedHost {
+                    address: ShareBind::with_scope(address, port, scope).socket_addr(),
+                    host_name,
+                    ca_cert_der_b64: form.ca.trim().to_string(),
+                    host_cert_fingerprint_sha256: fingerprint,
+                };
+                let secret = PairingSecret {
+                    role: PairingRole::Human,
+                    credential: form.credential.trim().to_string(),
+                };
+                (paired, secret)
+            }
         };
         let endpoint = RemoteEndpoint::from_socket_addr(paired.address).canonical();
         let existing_id = self

@@ -73,7 +73,9 @@ pub use autostart::{find_core_binary, spawn_core, CORE_ENV};
 pub use client::{Client, ClientConfig};
 pub use error::ClientError;
 pub use gateway::{GatewayConfig, GatewayServer};
-pub use peers::{PeerError, Peers, RemotePeer, MAX_PEERS_FILE_BYTES, PEERS_ENV};
+pub use peers::{
+    save_peer, PeerError, PeerSave, Peers, RemotePeer, MAX_PEERS_FILE_BYTES, PEERS_ENV,
+};
 pub use remote::{RemoteClient, RemoteEndpoint};
 pub use serial_nexus_protocol::{
     paths, ClientInfo, ClientKind, ControlReleaseReason, ControlState, DeviceStatus, DeviceSummary,

@@ -227,7 +227,7 @@ stops sharing it owns.
 - In the sidebar, `↑`/`↓` (or `j`/`k`) highlight, `Enter` (or `o`) opens or
   joins the highlighted device, `b` shows the highlighted attached device's
   scrollback (or, for a closed device that has none, the baud prompt) and `d`
-  disconnects the highlighted device. The sidebar also has Share and Connect
+  disconnects the highlighted device. `m` opens the MCP pairing form. The sidebar also has Share and Connect
   buttons before Settings: Share starts or stops the local host session (and
   opens pairing information when active), while Connect opens the remote host
   form. Focus buttons with arrows and activate with `Enter`, or click them.
@@ -382,16 +382,19 @@ a time per session, bounded waits and reads, Linux only).
 The MCP server can use a remote sharing session through the private pairing
 file described in [the MCP pairing guide](../crates/serial-nexus-mcp/README.md#reach-a-device-shared-by-another-host).
 In the terminal, start sharing and open the Pairing view (`p`) to read the
-endpoint, CA, certificate fingerprint and **MCP credential**. On the MCP host,
-add these values to `~/.config/serial-nexus/mcp-peers.json` (or the configured
-`SERIAL_NEXUS_MCP_PEERS` path) with mode `0600`, using the documented `paired`
-and `secret` JSON fields. Set `secret.role` to `ai`, and use the endpoint's IP
-and listener port in remote tool arguments. The credential is a bearer secret:
-keep it out of shell history, the repository, MCP host configuration arguments,
-and every tool call. The MCP process sends only the file path through the
-terminal gateway; the gateway reads the file and keeps the credential out of
-MCP tool arguments and output. Stopping sharing or closing the owner terminal
-revokes the credential; a new session requires updating the pairing file.
+**MCP/AI sharing key**. With the sidebar focused, `m` opens the MCP pairing
+form: enter the endpoint address, port and paste the AI key, then `Enter`. The
+terminal saves the entry to `~/.config/serial-nexus/mcp-peers.json` (or the
+configured `SERIAL_NEXUS_MCP_PEERS` path) with mode `0600`, atomically and
+without touching any other endpoint. If that endpoint is already paired the
+form asks first; `Esc` or a failure leaves the file exactly as it was. Saving a
+key never connects, requests control or changes sharing. The credential and key
+stay out of shell history, the repository, MCP host configuration arguments and
+every tool call: the MCP process sends only the file path through the terminal
+gateway, which reads the file and keeps the credential out of tool arguments and
+output. Stopping sharing or closing the owner terminal revokes the credential; a
+new session requires updating the pairing file. A hand-written file in the
+documented format still works.
 
 ### Sharing devices on the LAN from the terminal
 
@@ -416,10 +419,16 @@ Nothing listens on the network until it is started deliberately.
    address and what a remote client needs.
 
 The pairing view (`p` while the sidebar has focus; `Enter` on the Share button
-turns sharing off, so use `p` to inspect it) shows the host name, the host certificate's SHA-256 fingerprint, the session's CA certificate
-(base64 DER) and two separate credentials: one for the human terminal, one for
-MCP/AI clients. The credentials are shown only to the owner, are never written
-to the settings file or a device, and disappear when sharing stops. Use `↑`/`↓`
+turns sharing off, so use `p` to inspect it) normally shows the bound address
+and two clearly labelled, distinct **sharing keys**: a human terminal key and an
+MCP/AI key. Each key is one long string that bundles the host certificate
+verification and that role's credential. Treat a key as a password: copy it
+with the address and port into the other terminal or the MCP pairing form, and
+never put it in a repository, issue, tool call or shell history. Keys are shown
+only to the owner, are never written to the settings file or a device, and stop
+working when sharing stops or restarts. Press `a` for the **older host fields**
+(host name, the host certificate's SHA-256 fingerprint, the CA certificate and
+the two separate credentials) for a terminal that predates keys. Use `↑`/`↓`
 to scroll the long certificate.
 
 While sharing is on, saving a checklist that unchecks a device tells the core
@@ -449,11 +458,16 @@ do.
 ### Connecting to a shared host
 
 The sidebar's `[ Connect ]` button (or `c`) opens a form for the host address,
-port, CA certificate, host fingerprint and human pairing credential. Every value
-is entered by hand or pasted and lives only in memory: it is not saved, not
-logged and never sent to a serial device. The terminal verifies the host's
-certificate against the entered CA and pinned fingerprint before sending the
-credential; a mismatch is refused and the form stays open with the reason.
+port and **human sharing key**. Paste the whole key in one action (including a
+terminal bracketed paste) or type it. The terminal strictly checks the key's
+version, length, format and human role, refuses a key for a different host
+address, and verifies the host's certificate against the key's CA and pinned
+fingerprint before sending the credential. A malformed, wrong-role, wrong-host
+or stale key keeps the form open with a clear reason and never falls back to an
+unverified connection. The key and the rest of the form live only in memory:
+nothing is saved, logged or sent to a serial device. `Ctrl+A` switches the form
+to the older separate fields (CA certificate, fingerprint and human credential)
+for connecting to a host that predates keys.
 
 After a successful pair, the connected host's approved devices appear in the
 sidebar under a `Remote <address:port>` heading (the local devices stay under

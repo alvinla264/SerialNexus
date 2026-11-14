@@ -96,6 +96,7 @@ fn event_loop(
                         app.handle_key(key);
                     }
                 }
+                event::Event::Paste(text) => app.handle_paste(&text),
                 event::Event::Mouse(mouse) => handle_mouse(app, last_area, mouse),
                 event::Event::Resize(_, _) => {
                     app.handle_resize();

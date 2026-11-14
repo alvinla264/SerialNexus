@@ -15,6 +15,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{ClientInfo, Limits, ProtocolError, RequestMessage};
@@ -294,6 +295,332 @@ pub struct ShareSessionInfo {
     pub host: PairedHost,
     pub human: PairingSecret,
     pub ai: PairingSecret,
+}
+
+/// Version of the single-string sharing key.
+///
+/// A sharing key bundles what a remote client needs to authenticate one host:
+/// the host's TLS name, the session certificate authority and pinned host
+/// certificate, plus exactly one pairing credential. It is the normal way to
+/// pair a human terminal or an MCP client; the individual fields remain
+/// available for older clients.
+pub const SHARING_KEY_VERSION: u32 = 1;
+
+/// Most a sharing key may be, in bytes. The certificate authority dominates
+/// the payload; this bound stops a pasted value from being decoded or copied
+/// without limit.
+pub const MAX_SHARING_KEY_BYTES: usize = 4096;
+
+/// Most a decoded sharing-key payload may be, in bytes.
+pub const MAX_SHARING_KEY_PAYLOAD_BYTES: usize = 2048;
+
+/// Prefix that opens every sharing key, then the version digits.
+const SHARING_KEY_PREFIX: &str = "snx";
+
+/// Most a pairing credential may be. Credentials are generated tokens, never
+/// free text.
+const MAX_CREDENTIAL_BYTES: usize = 512;
+
+/// Why a sharing key could not be built or read.
+///
+/// No variant or message ever holds a credential or echoes the pasted text, so
+/// a malformed key can be reported without printing a secret.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SharingKeyError {
+    #[error("this is not a SerialNexus sharing key")]
+    NotAKey,
+
+    #[error("the sharing key is {size} bytes, more than the {max} byte limit")]
+    TooLong { size: usize, max: usize },
+
+    #[error("the sharing key uses version {version}; this build understands version {SHARING_KEY_VERSION}")]
+    BadVersion { version: u32 },
+
+    #[error("the sharing key names an unknown role; expected a human or MCP/AI key")]
+    BadRole,
+
+    #[error("the sharing key's body is not valid unpadded base64url")]
+    BadEncoding,
+
+    #[error("the sharing key is malformed or has an unsupported field")]
+    BadFormat,
+
+    #[error("this is a {found} sharing key, but a {expected} sharing key is needed here")]
+    WrongRole {
+        expected: PairingRole,
+        found: PairingRole,
+    },
+}
+
+fn role_name(role: PairingRole) -> &'static str {
+    match role {
+        PairingRole::Human => "human terminal",
+        PairingRole::Ai => "MCP/AI",
+    }
+}
+
+impl fmt::Display for PairingRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(role_name(*self))
+    }
+}
+
+/// One host's authenticated pairing as a single copy-and-paste string.
+///
+/// Build it with [`SharingKey::encode`] on the sharing host and read it with
+/// [`SharingKey::parse`] or [`SharingKey::parse_for`] on the receiving side.
+/// The key is password-equivalent: its `Debug` output is redacted, and it is
+/// never written to settings, logs or a serial device.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SharingKey {
+    host_name: String,
+    ca_cert_der_b64: String,
+    host_cert_fingerprint_sha256: String,
+    secret: PairingSecret,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharingKeyPayload {
+    /// Key format version.
+    v: u32,
+    /// The role this credential pairs as.
+    r: PairingRole,
+    /// The host's TLS name, which is its bind IP address as text.
+    h: String,
+    /// Base64 (standard, padded) DER of the session's certificate authority.
+    c: String,
+    /// Lowercase hex SHA-256 of the host's leaf certificate DER.
+    f: String,
+    /// The role's pairing credential.
+    k: String,
+}
+
+impl SharingKey {
+    /// Encode one pairing as a bounded, versioned key string.
+    ///
+    /// Refuses data that could not be read back strictly, so a key that is
+    /// shown to a human always parses.
+    pub fn encode(paired: &PairedHost, secret: &PairingSecret) -> Result<String, SharingKeyError> {
+        let host: IpAddr = paired
+            .host_name
+            .parse()
+            .map_err(|_| SharingKeyError::BadFormat)?;
+        if host != paired.address.ip() {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let key = Self {
+            host_name: paired.host_name.clone(),
+            ca_cert_der_b64: paired.ca_cert_der_b64.clone(),
+            host_cert_fingerprint_sha256: paired.host_cert_fingerprint_sha256.clone(),
+            secret: secret.clone(),
+        };
+        key.validate()?;
+        let payload = SharingKeyPayload {
+            v: SHARING_KEY_VERSION,
+            r: key.secret.role,
+            h: key.host_name.clone(),
+            c: key.ca_cert_der_b64.clone(),
+            f: key.host_cert_fingerprint_sha256.clone(),
+            k: key.secret.credential.clone(),
+        };
+        let body = serde_json::to_vec(&payload).map_err(|_| SharingKeyError::BadFormat)?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&body);
+        let role = match key.secret.role {
+            PairingRole::Human => "human",
+            PairingRole::Ai => "ai",
+        };
+        let text = format!("{SHARING_KEY_PREFIX}{SHARING_KEY_VERSION}.{role}.{encoded}");
+        if text.len() > MAX_SHARING_KEY_BYTES {
+            return Err(SharingKeyError::TooLong {
+                size: text.len(),
+                max: MAX_SHARING_KEY_BYTES,
+            });
+        }
+        Ok(text)
+    }
+
+    /// Read a key of either role with strict version, length and format checks.
+    pub fn parse(text: &str) -> Result<Self, SharingKeyError> {
+        let text = text.trim();
+        if text.len() > MAX_SHARING_KEY_BYTES {
+            return Err(SharingKeyError::TooLong {
+                size: text.len(),
+                max: MAX_SHARING_KEY_BYTES,
+            });
+        }
+        if text.is_empty() || !text.is_ascii() || text.chars().any(char::is_whitespace) {
+            return Err(SharingKeyError::NotAKey);
+        }
+        let mut parts = text.split('.');
+        let (Some(prefix), Some(role), Some(body), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(SharingKeyError::NotAKey);
+        };
+        let digits = prefix
+            .strip_prefix(SHARING_KEY_PREFIX)
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or(SharingKeyError::NotAKey)?;
+        let version: u32 = digits
+            .parse()
+            .map_err(|_| SharingKeyError::BadVersion { version: 0 })?;
+        if version != SHARING_KEY_VERSION {
+            return Err(SharingKeyError::BadVersion { version });
+        }
+        let role = match role {
+            "human" => PairingRole::Human,
+            "ai" => PairingRole::Ai,
+            _ => return Err(SharingKeyError::BadRole),
+        };
+        if body.len() > MAX_SHARING_KEY_PAYLOAD_BYTES * 2 {
+            return Err(SharingKeyError::TooLong {
+                size: text.len(),
+                max: MAX_SHARING_KEY_BYTES,
+            });
+        }
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .map_err(|_| SharingKeyError::BadEncoding)?;
+        // Only the canonical spelling is accepted, so two different strings
+        // never mean the same key.
+        if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&decoded) != body {
+            return Err(SharingKeyError::BadEncoding);
+        }
+        if decoded.len() > MAX_SHARING_KEY_PAYLOAD_BYTES {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let payload: SharingKeyPayload =
+            serde_json::from_slice(&decoded).map_err(|_| SharingKeyError::BadFormat)?;
+        if payload.v != SHARING_KEY_VERSION {
+            return Err(SharingKeyError::BadVersion { version: payload.v });
+        }
+        if payload.r != role {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let key = Self {
+            host_name: payload.h,
+            ca_cert_der_b64: payload.c,
+            host_cert_fingerprint_sha256: payload.f,
+            secret: PairingSecret {
+                role,
+                credential: payload.k,
+            },
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    /// Read a key and require it to pair as `expected`, so a human key can
+    /// never be used where an AI key belongs (or the reverse).
+    pub fn parse_for(text: &str, expected: PairingRole) -> Result<Self, SharingKeyError> {
+        let key = Self::parse(text)?;
+        if key.secret.role != expected {
+            return Err(SharingKeyError::WrongRole {
+                expected,
+                found: key.secret.role,
+            });
+        }
+        Ok(key)
+    }
+
+    /// The host identity this key authenticates. The address and port are
+    /// entered separately on the receiving side and checked against this.
+    pub fn host_ip(&self) -> IpAddr {
+        self.host_name
+            .parse()
+            .expect("a parsed sharing key always names an IP address")
+    }
+
+    /// The host's TLS name as the sharing host reported it.
+    pub fn host_name(&self) -> &str {
+        &self.host_name
+    }
+
+    /// The pairing ready to dial, with the receiver's chosen address and port.
+    /// Refuses an address for a different host than the key names.
+    pub fn paired_with(&self, address: SocketAddr) -> Result<PairedHost, SharingKeyError> {
+        let canonical = |ip: IpAddr| match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            other => other,
+        };
+        if canonical(address.ip()) != canonical(self.host_ip()) || address.port() == 0 {
+            return Err(SharingKeyError::BadFormat);
+        }
+        Ok(PairedHost {
+            address,
+            host_name: self.host_name.clone(),
+            ca_cert_der_b64: self.ca_cert_der_b64.clone(),
+            host_cert_fingerprint_sha256: self.host_cert_fingerprint_sha256.clone(),
+        })
+    }
+
+    pub fn secret(&self) -> &PairingSecret {
+        &self.secret
+    }
+
+    pub fn role(&self) -> PairingRole {
+        self.secret.role
+    }
+
+    /// The complete key string, for the host's owner to copy to the other
+    /// machine.
+    pub fn to_key_string(&self) -> String {
+        SharingKey::encode(
+            &PairedHost {
+                address: SocketAddr::new(self.host_ip(), 1),
+                host_name: self.host_name.clone(),
+                ca_cert_der_b64: self.ca_cert_der_b64.clone(),
+                host_cert_fingerprint_sha256: self.host_cert_fingerprint_sha256.clone(),
+            },
+            &self.secret,
+        )
+        .expect("a parsed sharing key re-encodes")
+    }
+
+    fn validate(&self) -> Result<(), SharingKeyError> {
+        let host: IpAddr = self
+            .host_name
+            .parse()
+            .map_err(|_| SharingKeyError::BadFormat)?;
+        // The TLS name is the canonical text of the bind address, never another
+        // spelling or a host name.
+        if host.to_string() != self.host_name {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let ca =
+            crate::decode_bytes(&self.ca_cert_der_b64).map_err(|_| SharingKeyError::BadFormat)?;
+        if ca.is_empty() || ca.len() > MAX_SHARING_KEY_PAYLOAD_BYTES {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let fingerprint = &self.host_cert_fingerprint_sha256;
+        if fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(SharingKeyError::BadFormat);
+        }
+        let credential = &self.secret.credential;
+        if credential.is_empty()
+            || credential.len() > MAX_CREDENTIAL_BYTES
+            || !credential.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(SharingKeyError::BadFormat);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for SharingKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharingKey")
+            .field("role", &self.secret.role)
+            .field("host", &self.host_name)
+            .field("credential", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// A checked device and the identity it was authorized as.
@@ -875,5 +1202,158 @@ mod broadcast_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod sharing_key_tests {
+    use super::*;
+
+    fn paired_host() -> PairedHost {
+        PairedHost {
+            address: "192.0.2.10:7331".parse().unwrap(),
+            host_name: "192.0.2.10".to_string(),
+            ca_cert_der_b64: crate::encode_bytes(&[7u8; 480]),
+            host_cert_fingerprint_sha256: "ab".repeat(32),
+        }
+    }
+
+    fn secret(role: PairingRole) -> PairingSecret {
+        PairingSecret {
+            role,
+            credential: "Y3JlZGVudGlhbC1mb3ItdGhlLXRlc3Q".to_string(),
+        }
+    }
+
+    fn key(role: PairingRole) -> String {
+        SharingKey::encode(&paired_host(), &secret(role)).expect("a valid key encodes")
+    }
+
+    #[test]
+    fn a_key_round_trips_both_roles_and_keeps_the_host_verification() {
+        for role in [PairingRole::Human, PairingRole::Ai] {
+            let text = key(role);
+            let parsed = SharingKey::parse(&text).expect("the key parses");
+            assert_eq!(parsed.role(), role);
+            assert_eq!(parsed.host_name(), "192.0.2.10");
+            assert_eq!(
+                parsed
+                    .paired_with(paired_host().address)
+                    .expect("the key names this host"),
+                paired_host()
+            );
+            assert_eq!(parsed.secret(), &secret(role));
+            assert_eq!(parsed.to_key_string(), text, "encoding is stable");
+            assert!(text.starts_with("snx1."));
+            assert!(text.len() <= MAX_SHARING_KEY_BYTES);
+        }
+    }
+
+    #[test]
+    fn a_key_is_refused_under_the_other_role() {
+        let human = key(PairingRole::Human);
+        let error = SharingKey::parse_for(&human, PairingRole::Ai).expect_err("wrong role");
+        assert!(matches!(
+            error,
+            SharingKeyError::WrongRole {
+                expected: PairingRole::Ai,
+                found: PairingRole::Human
+            }
+        ));
+        let message = error.to_string();
+        assert!(message.contains("human"), "{message}");
+        assert!(!message.contains(&secret(PairingRole::Human).credential));
+        assert!(
+            SharingKey::parse_for(&human, PairingRole::Human).is_ok(),
+            "the right role is accepted"
+        );
+    }
+
+    #[test]
+    fn malformed_oversize_and_foreign_keys_are_refused_without_echoing_them() {
+        let credential = secret(PairingRole::Human).credential;
+        let cases = [
+            String::new(),
+            "hello".to_string(),
+            "snx1.human".to_string(),
+            "snx1.human.!!!not-base64!!!".to_string(),
+            "snx2.human.AAAA".to_string(),
+            "snx1.robot.AAAA".to_string(),
+            format!("snx1.human.{}", "A".repeat(MAX_SHARING_KEY_BYTES)),
+            format!("{} {}", key(PairingRole::Human), credential),
+        ];
+        for text in cases {
+            let error = SharingKey::parse(&text).expect_err("refused");
+            assert!(!error.to_string().contains(&credential), "{error}");
+            assert!(
+                text.is_empty() || !error.to_string().contains(&text),
+                "{error}"
+            );
+        }
+        let over_limit = format!("snx1.human.{}", "A".repeat(MAX_SHARING_KEY_BYTES));
+        assert!(matches!(
+            SharingKey::parse(&over_limit),
+            Err(SharingKeyError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pasted_key_may_have_surrounding_whitespace_but_not_inside_it() {
+        let text = key(PairingRole::Ai);
+        let pasted = format!("\n  {text}\r\n");
+        assert_eq!(
+            SharingKey::parse(&pasted).expect("trimmed").role(),
+            PairingRole::Ai
+        );
+        let split = format!("{} {}", &text[..20], &text[20..]);
+        assert!(SharingKey::parse(&split).is_err());
+    }
+
+    #[test]
+    fn a_payload_with_bad_fields_or_unknown_fields_is_refused() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let encode_json =
+            |json: &str| format!("snx1.human.{}", URL_SAFE_NO_PAD.encode(json.as_bytes()));
+        let ca = crate::encode_bytes(&[1u8; 16]);
+        let pin = "ab".repeat(32);
+        let good =
+            format!(r#"{{"v":1,"r":"human","h":"192.0.2.10","c":"{ca}","f":"{pin}","k":"cred"}}"#);
+        assert!(
+            SharingKey::parse(&encode_json(&good)).is_ok(),
+            "the fixture is valid"
+        );
+        for bad in [
+            good.replace(r#""v":1"#, r#""v":2"#),
+            good.replace(r#""r":"human""#, r#""r":"ai""#),
+            good.replace(r#""h":"192.0.2.10""#, r#""h":"example.test""#),
+            good.replace(r#""h":"192.0.2.10""#, r#""h":"0:0:0:0:0:0:0:1""#),
+            good.replace(&pin, &pin.to_uppercase()),
+            good.replace(&pin, &pin[..62]),
+            good.replace(&ca, "!!!!"),
+            good.replace(r#""k":"cred""#, r#""k":"""#),
+            good.replace('}', r#","x":1}"#),
+        ] {
+            let error = SharingKey::parse(&encode_json(&bad)).expect_err(&bad);
+            assert!(!error.to_string().contains("cred"), "{error}");
+        }
+        // Non-canonical base64: an ignored padding character.
+        let padded = format!("{}.=", key(PairingRole::Human));
+        assert!(SharingKey::parse(&padded).is_err());
+    }
+
+    #[test]
+    fn a_key_never_prints_its_credential_from_debug_or_display() {
+        let text = key(PairingRole::Human);
+        let parsed = SharingKey::parse(&text).unwrap();
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains(&parsed.secret().credential));
+        assert!(debug.contains("redacted"));
+        assert!(!SharingKeyError::WrongRole {
+            expected: PairingRole::Ai,
+            found: PairingRole::Human
+        }
+        .to_string()
+        .contains(&parsed.secret().credential));
     }
 }

@@ -35,7 +35,7 @@ use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serial_nexus_protocol::{decode_bytes, PairedHost, PairingSecret};
 
 use crate::remote::RemoteEndpoint;
@@ -106,11 +106,33 @@ pub enum PeerError {
         path: PathBuf,
         endpoint: RemoteEndpoint,
     },
+
+    #[error(
+        "the remote pairing file {path} already pairs {endpoint}; replace that entry only after confirming it"
+    )]
+    Exists {
+        path: PathBuf,
+        endpoint: RemoteEndpoint,
+    },
+
+    #[error("cannot write the remote pairing file {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// What saving one endpoint did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerSave {
+    Added,
+    Replaced,
 }
 
 /// One paired endpoint: where it is, which host certificate and credential
 /// authenticate it.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemotePeer {
     /// Explicit address and port this entry is for; must equal the pairing's.
@@ -176,7 +198,7 @@ impl fmt::Debug for RemotePeer {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PeerFile {
     version: u32,
@@ -236,7 +258,19 @@ impl Peers {
     /// Load a pairing file, refusing anything another user could read.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PeerError> {
         let path = path.as_ref().to_path_buf();
-        let file = open_private(&path)?;
+        Self::load_optional(&path)?.ok_or(PeerError::Missing { path })
+    }
+
+    /// Load a pairing file, or `None` when it does not exist yet. Every other
+    /// failure (unsafe permissions, a link, invalid JSON) is still an error:
+    /// an absent file may be created, a broken one is never replaced.
+    pub fn load_optional(path: impl AsRef<Path>) -> Result<Option<Self>, PeerError> {
+        let path = path.as_ref().to_path_buf();
+        let file = match open_private(&path) {
+            Ok(file) => file,
+            Err(PeerError::Missing { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let metadata = file.metadata().map_err(|source| PeerError::Io {
             path: path.clone(),
             source,
@@ -293,10 +327,10 @@ impl Peers {
             }
             seen.push(canonical);
         }
-        Ok(Self {
+        Ok(Some(Self {
             path,
             peers: parsed.peers,
-        })
+        }))
     }
 
     /// The pairing for exactly this address and port.
@@ -407,6 +441,167 @@ fn check_private_as(
         });
     }
     Ok(())
+}
+
+/// Add one endpoint to a pairing file, or replace its entry when allowed.
+///
+/// The file and every other entry are left untouched on any failure: the new
+/// file is fully serialized into an exclusively created staging file, synced,
+/// and only then renamed over the old one. An existing entry is replaced only
+/// with `replace_existing`, so a person who cancels a replacement keeps the
+/// working pairing. No error message contains a credential.
+pub fn save_peer(
+    path: impl AsRef<Path>,
+    endpoint: RemoteEndpoint,
+    paired: PairedHost,
+    secret: PairingSecret,
+    replace_existing: bool,
+) -> Result<PeerSave, PeerError> {
+    let path = path.as_ref().to_path_buf();
+    let peer = RemotePeer {
+        endpoint,
+        paired,
+        secret,
+    };
+    peer.validate().map_err(|reason| PeerError::Format {
+        path: path.clone(),
+        reason: format!("{endpoint}: {reason}"),
+    })?;
+
+    let mut peers = Peers::load_optional(&path)?
+        .map(|peers| peers.peers)
+        .unwrap_or_default();
+    let wanted = endpoint.canonical();
+    let outcome = match peers
+        .iter()
+        .position(|entry| entry.endpoint.canonical() == wanted)
+    {
+        Some(index) => {
+            if !replace_existing {
+                return Err(PeerError::Exists {
+                    path: path.clone(),
+                    endpoint,
+                });
+            }
+            peers[index] = peer;
+            PeerSave::Replaced
+        }
+        None => {
+            peers.push(peer);
+            PeerSave::Added
+        }
+    };
+
+    let file = PeerFile {
+        version: PEERS_VERSION,
+        peers,
+    };
+    let mut text = serde_json::to_string_pretty(&file).map_err(|_| PeerError::Format {
+        path: path.clone(),
+        reason: "the updated pairing file could not be serialized".to_string(),
+    })?;
+    text.push('\n');
+    if text.len() > MAX_PEERS_FILE_BYTES {
+        return Err(PeerError::Format {
+            path: path.clone(),
+            reason: format!("the updated file would exceed {MAX_PEERS_FILE_BYTES} bytes"),
+        });
+    }
+    write_peer_file(&path, &text)?;
+    Ok(outcome)
+}
+
+/// Replace a pairing file atomically, keeping it readable by its owner only.
+fn write_peer_file(path: &Path, text: &str) -> Result<(), PeerError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|source| PeerError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+    // Never write through a symbolic link planted at the destination, even
+    // though the rename below replaces the link itself rather than its target.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(PeerError::NotRegular {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(PeerError::Write {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+
+    let staging = staging_peer_path(path);
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staging)
+    {
+        Ok(file) => file,
+        Err(source) => {
+            return Err(PeerError::Write {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let staged = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    if let Err(source) = staged {
+        drop(file);
+        let _ = std::fs::remove_file(&staging);
+        return Err(PeerError::Write {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    drop(file);
+    if let Err(source) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(PeerError::Write {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    // Make the rename durable. Not every filesystem permits syncing a
+    // directory; the replacement itself already happened.
+    if let Some(parent) = path.parent() {
+        let directory = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(directory) = File::open(directory) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// A staging file next to `path`, unique to this process and moment.
+fn staging_peer_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mcp-peers.json".to_string());
+    let moment = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.{moment}.tmp", std::process::id()))
 }
 
 #[cfg(test)]

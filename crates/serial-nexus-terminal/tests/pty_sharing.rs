@@ -148,18 +148,31 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     click_text(&mut tui, "[ Share: off ]");
     tui.wait_for_text("focus: pairing");
     tui.wait_for_text("Firewall and router settings");
+    // The normal view shows two distinct, labelled sharing keys.
+    tui.wait_for_text("Human terminal key");
+    tui.wait_for_text("MCP/AI key");
+    tui.wait_until("both key prefixes on screen", |text| {
+        text.contains("snx1.human.") && text.contains("snx1.ai.")
+    });
+    assert!(
+        !fixture.settings_text().contains("snx1."),
+        "the settings file never holds a sharing key"
+    );
+
+    // `a` shows the older host fields a terminal without keys needs.
+    tui.send_text("a");
+    tui.wait_for_text("Older host fields");
     tui.wait_for_text("certificate SHA-256");
-    // The CA certificate is long: the credentials are below it.
+    // The CA certificate is long: the separate credentials are below it.
     for _ in 0..60 {
         tui.send(b"\x1b[B");
         std::thread::sleep(Duration::from_millis(15));
     }
-    tui.wait_for_text("Human terminal pairing");
-    tui.wait_for_text("MCP (AI) pairing");
-    assert!(
-        tui.text().contains("credential:"),
-        "both credentials are shown to the host"
-    );
+    tui.wait_until("the separate credentials", |text| {
+        text.contains("human credential") && text.contains("MCP (AI) credential")
+    });
+    tui.send_text("a");
+    tui.wait_for_text("Human terminal key");
     assert!(
         !fixture.settings_text().contains("credential"),
         "the settings file never holds a pairing secret"
