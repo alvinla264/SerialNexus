@@ -1,10 +1,12 @@
 //! Private files for transferring a sharing key when the terminal cannot put
 //! it on the clipboard.
 //!
-//! A key file is a small owner-only file (`0600`) in a private directory. The
-//! Connect and MCP pairing forms accept `file:/absolute/path` in the key field
-//! and read the key from there, so a person can move the file privately (USB,
-//! `scp`) instead of selecting hard-wrapped screen text.
+//! A key file is a small owner-only file (`0600`) in a private directory on a
+//! memory-backed filesystem (`XDG_RUNTIME_DIR`, or `/dev/shm`). The Connect and
+//! MCP pairing forms accept `file:/absolute/path` in the key field and read the
+//! key from there, so a person can move the file privately (USB, `scp`) instead
+//! of selecting hard-wrapped screen text. The file is removed when sharing
+//! stops or the terminal exits; it is never written to durable storage.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -12,22 +14,49 @@ use std::path::{Path, PathBuf};
 
 use serial_nexus_protocol::{PairingRole, MAX_SHARING_KEY_BYTES};
 
-use crate::settings::default_path;
-
-/// Directory under the terminal's config directory holding pairing key files.
+/// A private, memory-backed directory for the temporary key files.
+///
+/// `XDG_RUNTIME_DIR` is per-user and cleared at logout. Without it, use a
+/// per-user directory on `/dev/shm` (also tmpfs); never a disk-backed config
+/// directory.
 pub fn key_directory() -> Option<PathBuf> {
-    default_path().and_then(|path| path.parent().map(|parent| parent.join("pairing-keys")))
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(runtime).join("serial-nexus/pairing-keys"));
+    }
+    let shm = Path::new("/dev/shm");
+    if shm.is_dir() {
+        Some(
+            shm.join(format!("serial-nexus-{}", unsafe { libc::geteuid() }))
+                .join("pairing-keys"),
+        )
+    } else {
+        None
+    }
+}
+
+/// Remove the temporary key files when the session ends.
+pub fn clear_key_files() {
+    let Some(directory) = key_directory() else {
+        return;
+    };
+    for role in [PairingRole::Human, PairingRole::Ai] {
+        let Some(name) = key_name(role) else { continue };
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+    let _ = std::fs::remove_dir(directory);
 }
 
 /// The default file for one role's key, when the environment names a config
 /// directory.
 pub fn key_file_path(role: PairingRole) -> Option<PathBuf> {
-    key_directory().map(|directory| {
-        directory.join(match role {
-            PairingRole::Human => "human.key",
-            PairingRole::Ai => "ai.key",
-        })
-    })
+    key_directory().map(|directory| directory.join(key_name(role).unwrap_or("key")))
+}
+
+fn key_name(role: PairingRole) -> Option<&'static str> {
+    match role {
+        PairingRole::Human => Some("human.key"),
+        PairingRole::Ai => Some("ai.key"),
+    }
 }
 
 /// The path in a key field that starts with `file:`, if any.

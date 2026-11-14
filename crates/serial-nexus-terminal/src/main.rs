@@ -91,11 +91,14 @@ fn show_key_for_copy(view: &ClipboardCopy) -> io::Result<()> {
     // view before a selection is copied.
     crossterm::execute!(stdout, crossterm::event::DisableMouseCapture)?;
     let result = (|| {
-        draw_key_for_copy(&mut stdout, view)?;
+        let size = crossterm::terminal::size()?;
+        draw_key_for_copy(&mut stdout, view, size)?;
         loop {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => break,
-                Event::Resize(_, _) => draw_key_for_copy(&mut stdout, view)?,
+                Event::Resize(columns, rows) => {
+                    draw_key_for_copy(&mut stdout, view, (columns, rows))?
+                }
                 _ => {}
             }
         }
@@ -105,9 +108,26 @@ fn show_key_for_copy(view: &ClipboardCopy) -> io::Result<()> {
     result.and(restored)
 }
 
-fn draw_key_for_copy(stdout: &mut io::Stdout, view: &ClipboardCopy) -> io::Result<()> {
+fn draw_key_for_copy(
+    stdout: &mut io::Stdout,
+    view: &ClipboardCopy,
+    (columns, rows): (u16, u16),
+) -> io::Result<()> {
     use std::io::Write;
     write!(stdout, "\x1b[2J\x1b[H")?;
+    let key_rows = view.key.len().div_ceil(columns.max(1) as usize) + 4;
+    if key_rows > rows as usize {
+        // Never draw a key that does not fit: rows would scroll off and the
+        // selection could not contain the whole string. The caller's file
+        // fallback covers this after the person returns and presses v again.
+        writeln!(
+            stdout,
+            "SerialNexus {} — this pane is too small for the whole key. Press any key, enlarge the pane, then press v or V again.",
+            view.label
+        )?;
+        stdout.flush()?;
+        return Ok(());
+    }
     writeln!(
         stdout,
         "SerialNexus {} — select the whole line below and copy it, then press any key to return.",

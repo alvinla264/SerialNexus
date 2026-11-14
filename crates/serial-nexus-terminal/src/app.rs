@@ -1407,7 +1407,7 @@ impl App {
                     ""
                 };
                 self.state.notice = Some(Notice::info(format!(
-                    "{why}the {} is in {} (mode 0600); move it privately, then enter file:{} in the key field",
+                    "{why}the {} is in the memory-backed {} (mode 0600, removed when sharing stops); move it privately, then enter file:{} in the key field",
                     copy.label,
                     path.display(),
                     path.display()
@@ -1438,6 +1438,7 @@ impl App {
         match self.client.stop_sharing() {
             Ok(()) => {
                 self.state.sharing.clear_session();
+                pairing_file::clear_key_files();
                 if self.state.view == View::Pairing {
                     // Stop may come from the sidebar; do not hand the keys to
                     // the stream without an explicit focus change.
@@ -1974,6 +1975,7 @@ impl App {
             let _ = self.client.stop_sharing();
             self.state.sharing.clear_session();
         }
+        pairing_file::clear_key_files();
         for key in self.state.all_sessions() {
             if let Ok(transport) = self.endpoint_client(key.endpoint) {
                 let _ = transport.close(key.device_id);

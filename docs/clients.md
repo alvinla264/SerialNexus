@@ -432,11 +432,14 @@ instead of moving the app's highlight; select that whole line and press any key
 to return. Terminals that mark wrapped rows (Windows Terminal, xterm, tmux) copy
 it without inserting line breaks. If the pane is too short for the whole line,
 `v`/`V` do not clip it: they write the key to
-`$XDG_CONFIG_HOME/serial-nexus/pairing-keys/human.key` (or `ai.key`), mode
-`0600`, and say where. `w` and `W` write those files directly. Move the file to
-the receiving machine privately (USB, `scp`) and type `file:/absolute/path` in
-its key field (`Connect` or the MCP pairing form); the terminal reads it with
-the same owner-only, no-symlink rules and never prints its contents. The
+`$XDG_RUNTIME_DIR/serial-nexus/pairing-keys/human.key` (or `ai.key`; fallback
+`/dev/shm/serial-nexus-<uid>/pairing-keys`), a memory-backed directory, mode
+`0600`, and say where. `w` and `W` write those
+files directly. The files are removed when sharing stops or the terminal exits,
+and are never written to the config directory. Move the file to the receiving
+machine privately (USB, `scp`) and type `file:/absolute/path` in its key field
+(`Connect` or the MCP pairing form); the terminal reads it with the same
+owner-only, no-symlink rules and never prints its contents. The
 pairing view's own rows are hard-wrapped, so selecting those adds line breaks
 and the receiving form refuses the result; use `c`/`C`, `v`/`V` or `w`/`W`
 instead. Never put a key in a

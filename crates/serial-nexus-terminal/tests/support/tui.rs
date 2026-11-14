@@ -87,6 +87,7 @@ impl TuiSession {
                 socket.with_file_name("gateway.sock"),
             )
             .env("XDG_CONFIG_HOME", xdg)
+            .env("XDG_RUNTIME_DIR", xdg.join("runtime"))
             .env("HOME", xdg)
             .env("TERM", "xterm-256color")
             .env_remove("SERIAL_NEXUS_CORE")

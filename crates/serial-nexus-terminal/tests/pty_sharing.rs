@@ -259,6 +259,18 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         before_motion,
         "mouse motion leaves the key view open"
     );
+    // Shrinking the pane while the key is shown must not clip it either.
+    let before_resize = tui.raw_transcript().len();
+    tui.resize(10, 40);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        !tui.raw_transcript()[before_resize..]
+            .windows(human.len())
+            .any(|window| window == human.as_bytes()),
+        "a shrunken pane does not redraw a clipped key"
+    );
+    tui.resize(ROWS, COLS);
+    std::thread::sleep(Duration::from_millis(200));
     tui.send_text("x");
     tui.wait_for_text("focus: pairing");
     tui.wait_for_text("Human terminal key");
@@ -293,7 +305,9 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     // The transcript is cumulative: only bytes after the resize matter here.
     let narrow_offset = tui.raw_transcript().len();
     tui.send_text("w");
-    let key_path = fixture.xdg.join("serial-nexus/pairing-keys/human.key");
+    let key_path = fixture
+        .xdg
+        .join("runtime/serial-nexus/pairing-keys/human.key");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !key_path.exists() {
         assert!(
@@ -328,6 +342,10 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     tui.wait_for_text("focus: pairing");
     tui.send_text("s");
     tui.wait_for_text("sharing stopped");
+    assert!(
+        !key_path.exists(),
+        "the temporary key file is removed when sharing stops"
+    );
     tui.wait_for_text("[ Share: off ]");
 
     // Nothing listens after the terminal leaves.
