@@ -9,7 +9,6 @@ license.workspace = true
 [dependencies]
 base64.workspace = true
 crossbeam-channel.workspace = true
-libc.workspace = true
 # `use-dev-tty` selects crossterm's level-triggered poll reader. The default
 # mio reader is edge-triggered and stops draining stdin as soon as it parses
 # one event, stranding a large paste (or keys after it) until new input

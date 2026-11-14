@@ -17,7 +17,6 @@ use serial_nexus_protocol::{
 };
 
 use crate::input::{echo_key, map_key, Action, Key};
-use crate::pairing_file;
 use crate::render::{hit_test, pairing_max_scroll, panes, settings_hit_test, Hit, SettingsHit};
 use crate::settings::{SettingsStore, TerminalSettings};
 use crate::state::{
@@ -526,8 +525,6 @@ impl App {
             Action::CopyAiKey => self.copy_pairing_key(PairingRole::Ai),
             Action::ShowHumanKey => self.show_pairing_key(PairingRole::Human),
             Action::ShowAiKey => self.show_pairing_key(PairingRole::Ai),
-            Action::WriteHumanKeyFile => self.write_pairing_key_file(PairingRole::Human),
-            Action::WriteAiKeyFile => self.write_pairing_key_file(PairingRole::Ai),
             Action::PairingScroll(delta) => self.scroll_pairing(delta),
             Action::Ignore => {}
         }
@@ -1229,9 +1226,7 @@ impl App {
         let (address, scope) =
             RemoteEndpoint::parse_address(form.address.trim()).map_err(McpSave::Failed)?;
         let port = parse_port(&form.port).map_err(McpSave::Failed)?;
-        let key_text = pairing_file::resolve_key_text(&form.key)
-            .map_err(|error| McpSave::Failed(format!("sharing key file: {error}")))?;
-        let key = SharingKey::parse_for(&key_text, PairingRole::Ai)
+        let key = SharingKey::parse_for(form.key.trim(), PairingRole::Ai)
             .map_err(|error| McpSave::Failed(format!("sharing key: {error}")))?;
         let socket = ShareBind::with_scope(address, port, scope).socket_addr();
         let paired = key.paired_with(socket).map_err(|_| {
@@ -1341,9 +1336,9 @@ impl App {
     /// Show one complete key as a single soft-wrapped line, for a terminal
     /// that ignores the clipboard escape or has it disabled. Selecting a
     /// soft-wrapped line copies it without inserted newlines in terminals that
-    /// mark wraps (Windows Terminal, xterm, tmux). If the key would not fit
-    /// the pane, it is written to an owner-only file instead, so no part is
-    /// lost to screen clipping.
+    /// mark wraps (Windows Terminal, xterm, tmux). A pane too short for the
+    /// whole line is refused with a short message: no part of a key is ever
+    /// clipped, and nothing is written to disk.
     pub fn show_pairing_key(&mut self, role: PairingRole) {
         let Some(key) = self.pairing_key(role) else {
             return;
@@ -1352,20 +1347,13 @@ impl App {
         let columns = self.state.cols().max(1);
         let rows = key.key.len().div_ceil(columns) + 4;
         if rows > self.state.rows() {
-            self.write_pairing_key(role, key, true);
+            self.state.notice = Some(Notice::info(format!(
+                "this pane is too short to show the whole {}; enlarge the terminal and press v or V again",
+                key.label
+            )));
             return;
         }
         self.state.show_key = Some(key);
-    }
-
-    /// Write one key to its owner-only file, for private transfer when the
-    /// terminal cannot copy and the pane is too small for the soft-wrapped
-    /// line.
-    pub fn write_pairing_key_file(&mut self, role: PairingRole) {
-        let Some(key) = self.pairing_key(role) else {
-            return;
-        };
-        self.write_pairing_key(role, key, false);
     }
 
     fn pairing_key(&mut self, role: PairingRole) -> Option<ClipboardCopy> {
@@ -1392,36 +1380,6 @@ impl App {
         }
     }
 
-    fn write_pairing_key(&mut self, role: PairingRole, copy: ClipboardCopy, too_small: bool) {
-        let Some(path) = pairing_file::key_file_path(role) else {
-            self.state.notice = Some(Notice::error(
-                "no configuration directory to write a key file; set XDG_CONFIG_HOME or HOME",
-            ));
-            return;
-        };
-        match pairing_file::write_key_file(&path, &copy.key) {
-            Ok(()) => {
-                let why = if too_small {
-                    "the pane is too small to show the whole key; "
-                } else {
-                    ""
-                };
-                self.state.notice = Some(Notice::info(format!(
-                    "{why}the {} is in the memory-backed {} (mode 0600, removed when sharing stops); move it privately, then enter file:{} in the key field",
-                    copy.label,
-                    path.display(),
-                    path.display()
-                )));
-            }
-            Err(error) => {
-                self.state.notice = Some(Notice::error(format!(
-                    "the {} could not be written: {error}",
-                    copy.label
-                )));
-            }
-        }
-    }
-
     /// Show or hide the older host fields in the pairing view.
     fn toggle_pairing_advanced(&mut self) {
         self.state.pairing_advanced = !self.state.pairing_advanced;
@@ -1438,7 +1396,6 @@ impl App {
         match self.client.stop_sharing() {
             Ok(()) => {
                 self.state.sharing.clear_session();
-                pairing_file::clear_key_files();
                 if self.state.view == View::Pairing {
                     // Stop may come from the sidebar; do not hand the keys to
                     // the stream without an explicit focus change.
@@ -1598,9 +1555,7 @@ impl App {
         let port = parse_port(&form.port)?;
         let (paired, secret) = match form.mode {
             FormMode::Key => {
-                let key_text = pairing_file::resolve_key_text(&form.key)
-                    .map_err(|error| format!("sharing key file: {error}"))?;
-                let key = SharingKey::parse_for(&key_text, PairingRole::Human)
+                let key = SharingKey::parse_for(form.key.trim(), PairingRole::Human)
                     .map_err(|error| format!("sharing key: {error}"))?;
                 let socket = ShareBind::with_scope(address, port, scope).socket_addr();
                 let paired = key.paired_with(socket).map_err(|_| {
@@ -1975,7 +1930,6 @@ impl App {
             let _ = self.client.stop_sharing();
             self.state.sharing.clear_session();
         }
-        pairing_file::clear_key_files();
         for key in self.state.all_sessions() {
             if let Ok(transport) = self.endpoint_client(key.endpoint) {
                 let _ = transport.close(key.device_id);

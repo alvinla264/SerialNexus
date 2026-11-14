@@ -118,8 +118,8 @@ fn draw_key_for_copy(
     let key_rows = view.key.len().div_ceil(columns.max(1) as usize) + 4;
     if key_rows > rows as usize {
         // Never draw a key that does not fit: rows would scroll off and the
-        // selection could not contain the whole string. The caller's file
-        // fallback covers this after the person returns and presses v again.
+        // selection could not contain the whole string. After enlarging, the
+        // person presses v again and the whole line is shown.
         writeln!(
             stdout,
             "SerialNexus {} — this pane is too small for the whole key. Press any key, enlarge the pane, then press v or V again.",

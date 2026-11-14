@@ -934,15 +934,15 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
     }
     lines.push(String::new());
     lines.push(
-        "Each key is a password: it is shown only here, is never saved to disk or sent to a device, and stops working when sharing stops."
+        "Each key is a password: it is shown only here, is never saved or sent to a device, and stops working when sharing stops."
             .to_string(),
     );
     lines.push(
-        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key; w or W writes a temporary owner-only file instead."
+        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key."
             .to_string(),
     );
     lines.push(
-        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key. A pane too short for the line writes the temporary key file instead."
+        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key. Enlarge the pane first if it is too short for the whole line."
             .to_string(),
     );
     if state.pairing_advanced {
@@ -1303,7 +1303,7 @@ fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
             " Ctrl+S save · Esc cancel · Tab/↑↓ move · Space/Enter toggle or edit ".to_string()
         }
         (Focus::Right, View::Pairing) => {
-            " ↑/↓ scroll · c/C copy · v/V show · w/W file · a older details · s stop · Esc back "
+            " ↑/↓ scroll · c/C copy · v/V select-copy · a older details · s stop · Esc back "
                 .to_string()
         }
         (Focus::Right, View::Connect) => {

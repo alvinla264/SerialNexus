@@ -97,10 +97,6 @@ pub enum Action {
     ShowHumanKey,
     /// Show the complete MCP/AI key as one soft-wrapped line for manual copy.
     ShowAiKey,
-    /// Write the complete human key to an owner-only file for private transfer.
-    WriteHumanKeyFile,
-    /// Write the complete MCP/AI key to an owner-only file.
-    WriteAiKeyFile,
     /// Scroll the pairing information back (`> 0`) or forward by lines.
     PairingScroll(i32),
     Ignore,
@@ -245,8 +241,6 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Char('C') => Action::CopyAiKey,
             Key::Char('v') => Action::ShowHumanKey,
             Key::Char('V') => Action::ShowAiKey,
-            Key::Char('w') => Action::WriteHumanKeyFile,
-            Key::Char('W') => Action::WriteAiKeyFile,
             Key::Up => Action::PairingScroll(-1),
             Key::Down => Action::PairingScroll(1),
             Key::PageUp => Action::PairingScroll(-(state.rows().max(1) as i32)),
