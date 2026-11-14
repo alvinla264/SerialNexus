@@ -152,7 +152,9 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Tab | Key::Down => Action::ConnectNext(1),
             Key::BackTab | Key::Up => Action::ConnectNext(-1),
             Key::Backspace => Action::ConnectBackspace,
-            Key::Char(ch) if ch.is_ascii_graphic() => Action::ConnectChar(ch),
+            // Every character reaches the form, including the space or
+            // non-ASCII character that makes a pasted key invalid.
+            Key::Char(ch) => Action::ConnectChar(ch),
             _ => Action::Ignore,
         };
     }
@@ -163,7 +165,7 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Tab | Key::Down => Action::McpNext(1),
             Key::BackTab | Key::Up => Action::McpNext(-1),
             Key::Backspace => Action::McpBackspace,
-            Key::Char(ch) if ch.is_ascii_graphic() => Action::McpChar(ch),
+            Key::Char(ch) => Action::McpChar(ch),
             _ => Action::Ignore,
         };
     }
@@ -678,6 +680,11 @@ mod sharing_input_tests {
             "Ctrl+A shows the older host fields"
         );
         assert_eq!(map_key(&state, Key::Char('a')), Action::ConnectChar('a'));
+        assert_eq!(
+            map_key(&state, Key::Char(' ')),
+            Action::ConnectChar(' '),
+            "a space reaches the field so it can be reported, not dropped"
+        );
         state.connect = Some(ConnectForm::advanced());
         assert_eq!(map_key(&state, Key::Enter), Action::ConnectSubmit);
     }

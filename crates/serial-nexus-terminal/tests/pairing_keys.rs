@@ -236,9 +236,12 @@ fn a_human_key_pairs_and_wrong_role_host_or_format_is_refused_without_dialling()
         "nothing dialled"
     );
 
-    // The right key, address and port connect and show the host's devices.
+    // Clearing the bad field starts over, and the right key, address and port
+    // connect and show the host's devices.
     terminal.edit_connect(|form| {
         form.address = address_of(&host.info);
+        form.key.clear();
+        form.key_invalid = false;
         form.key = human_key(&host.info);
     });
     terminal.app.submit_connect();

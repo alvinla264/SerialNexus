@@ -1180,6 +1180,14 @@ impl App {
         let Some(mut form) = self.state.mcp_pair.take() else {
             return;
         };
+        if form.key_invalid {
+            form.error = Some(
+                "the key field received an invalid character; clear the field and paste the whole key again"
+                    .to_string(),
+            );
+            self.state.mcp_pair = Some(form);
+            return;
+        }
         match self.save_mcp_pair(&mut form) {
             Ok((endpoint, path, outcome)) => {
                 self.state.mcp_pair = None;
@@ -1444,6 +1452,14 @@ impl App {
         let Some(mut form) = self.state.connect.take() else {
             return;
         };
+        if form.mode == FormMode::Key && form.key_invalid {
+            form.error = Some(
+                "the key field received an invalid character; clear the field and paste the whole key again"
+                    .to_string(),
+            );
+            self.state.connect = Some(form);
+            return;
+        }
         let result = self.connect_remote(&form);
         match result {
             Ok((id, label)) => {

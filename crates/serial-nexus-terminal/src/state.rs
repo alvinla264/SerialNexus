@@ -397,6 +397,10 @@ pub struct ConnectForm {
     pub fingerprint: String,
     pub credential: String,
     pub error: Option<String>,
+    /// Set when a typed character or paste into the key field was invalid.
+    /// Submission is refused until the key is started again, so a malformed
+    /// paste can never be silently repaired into an accepted key.
+    pub key_invalid: bool,
 }
 
 impl ConnectForm {
@@ -411,6 +415,7 @@ impl ConnectForm {
             fingerprint: String::new(),
             credential: String::new(),
             error: None,
+            key_invalid: false,
         }
     }
 
@@ -455,6 +460,9 @@ impl ConnectForm {
     pub fn push(&mut self, ch: char) {
         let strict = self.field == ConnectField::Key;
         let result = type_into(self.field.text_mut(self), strict, ch);
+        if strict && result.is_err() {
+            self.key_invalid = true;
+        }
         self.error = result.err().map(str::to_string);
     }
 
@@ -467,12 +475,24 @@ impl ConnectForm {
     /// paste is refused rather than cut short.
     pub fn push_str(&mut self, text: &str) {
         let strict = self.field == ConnectField::Key;
+        let was_empty = self.field.text_mut(self).is_empty();
         let result = paste_into(self.field.text_mut(self), strict, text);
+        if strict {
+            if result.is_err() {
+                self.key_invalid = true;
+            } else if was_empty {
+                self.key_invalid = false;
+            }
+        }
         self.error = result.err().map(str::to_string);
     }
 
     pub fn backspace(&mut self) {
-        self.field.text_mut(self).pop();
+        let field = self.field.text_mut(self);
+        field.pop();
+        if field.is_empty() {
+            self.key_invalid = false;
+        }
         self.error = None;
     }
 
@@ -586,6 +606,9 @@ pub struct McpPairForm {
     /// True once a person has been told the endpoint is already paired and
     /// asked to press Enter again; any edit cancels that confirmation.
     pub confirm_replace: bool,
+    /// Set when a typed character or paste into the AI key was invalid; saving
+    /// is refused until the key is started again.
+    pub key_invalid: bool,
 }
 
 impl McpPairForm {
@@ -597,6 +620,7 @@ impl McpPairForm {
             key: String::new(),
             error: None,
             confirm_replace: false,
+            key_invalid: false,
         }
     }
 
@@ -616,13 +640,25 @@ impl McpPairForm {
     /// whole or refused, never silently repaired or truncated.
     pub fn push_str(&mut self, text: &str) {
         let strict = self.field == McpField::Key;
+        let was_empty = self.field.text_mut(self).is_empty();
         let result = paste_into(self.field.text_mut(self), strict, text);
+        if strict {
+            if result.is_err() {
+                self.key_invalid = true;
+            } else if was_empty {
+                self.key_invalid = false;
+            }
+        }
         self.error = result.err().map(str::to_string);
         self.confirm_replace = false;
     }
 
     pub fn backspace(&mut self) {
-        self.field.text_mut(self).pop();
+        let field = self.field.text_mut(self);
+        field.pop();
+        if field.is_empty() {
+            self.key_invalid = false;
+        }
         self.error = None;
         self.confirm_replace = false;
     }
@@ -645,12 +681,24 @@ impl Default for McpPairForm {
 }
 
 /// One sharing key the owner asked to copy to the terminal's clipboard.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Debug` never prints the key: it is password-equivalent.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClipboardCopy {
     /// What was copied, for the footer notice.
     pub label: &'static str,
     /// The complete key string, unchanged and unwrapped.
     pub key: String,
+}
+
+impl std::fmt::Debug for ClipboardCopy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClipboardCopy")
+            .field("label", &self.label)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// One sidebar row: a host group heading or a device.
@@ -2611,11 +2659,17 @@ mod sharing_tests {
         form.push_str("snx1.human.abc");
         assert_eq!(form.key, format!("{before}snx1.human.abc"));
 
-        // Typed characters are strict too: a space is reported, not dropped.
+        // Typed characters are strict too: a space is reported, not dropped,
+        // and it blocks submission until the field is started again.
         form.error = None;
         form.push(' ');
         assert_eq!(form.key, format!("{before}snx1.human.abc"));
+        assert!(form.key_invalid);
         assert!(form.error.as_deref().unwrap_or("").contains("printable"));
+        for _ in 0..form.key.len() {
+            form.backspace();
+        }
+        assert!(!form.key_invalid, "an emptied field starts again");
 
         // An oversized paste is refused, never truncated into another value.
         let before = form.key.clone();
@@ -2631,6 +2685,17 @@ mod sharing_tests {
         assert!(!mcp.confirm_replace);
         mcp.push_str("snx1.ai.a b");
         assert_eq!(mcp.key, "snx1.ai.abc");
+    }
+
+    #[test]
+    fn a_clipboard_copy_never_prints_the_key() {
+        let copy = ClipboardCopy {
+            label: "human terminal key",
+            key: "snx1.human.super-secret-key".to_string(),
+        };
+        let debug = format!("{copy:?}");
+        assert!(!debug.contains("super-secret-key"), "{debug}");
+        assert!(debug.contains("redacted"), "{debug}");
     }
 
     #[test]
