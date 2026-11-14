@@ -131,6 +131,11 @@ fn the_connect_form_pairs_with_a_host_and_opens_its_allowed_unopened_port() {
     tui.send(KEY_ENTER);
 
     tui.wait_for_text("connected to");
+    let transcript = String::from_utf8_lossy(&tui.raw_transcript()).into_owned();
+    assert!(
+        !transcript.contains(&key),
+        "the terminal never draws the pasted key"
+    );
     tui.wait_for_text("Remote 127.0.0.1:");
     tui.wait_for_text(&path);
     // The group heading names the endpoint.

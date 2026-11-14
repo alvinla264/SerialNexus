@@ -79,6 +79,29 @@ fn copy_key_to_clipboard(copy: &ClipboardCopy) -> io::Result<()> {
     stdout.flush()
 }
 
+/// Show one complete key as a single soft-wrapped line.
+///
+/// The key is not saved and stays only on this alternate screen; any key
+/// returns to the normal view.
+fn show_key_for_copy(view: &ClipboardCopy) -> io::Result<()> {
+    use std::io::Write;
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b[2J\x1b[H")?;
+    writeln!(
+        stdout,
+        "SerialNexus {} — select the whole line below and copy it, then press any key to return.",
+        view.label
+    )?;
+    writeln!(stdout)?;
+    // No newline until after the key: the terminal wraps it as one logical
+    // line, which terminals that mark wraps copy without inserting line
+    // breaks.
+    write!(stdout, "{}", view.key)?;
+    writeln!(stdout)?;
+    writeln!(stdout)?;
+    stdout.flush()
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -91,6 +114,20 @@ fn event_loop(
             // OSC 52 asks the terminal to set its clipboard; a terminal that
             // does not support it simply ignores the sequence.
             let _ = copy_key_to_clipboard(&copy);
+        }
+        if let Some(view) = app.state.show_key.take() {
+            // A terminal-independent fallback: one logical line that the
+            // terminal soft-wraps, so selecting it copies the key without
+            // inserted newlines. Any input returns to the TUI.
+            show_key_for_copy(&view)?;
+            loop {
+                if event::poll(Duration::from_millis(100))? {
+                    let _ = event::read()?;
+                    break;
+                }
+            }
+            terminal.clear()?;
+            continue;
         }
         terminal.draw(|frame| {
             let area = frame.area();

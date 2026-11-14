@@ -93,6 +93,10 @@ pub enum Action {
     CopyHumanKey,
     /// Ask the terminal to copy the complete MCP/AI key to its clipboard.
     CopyAiKey,
+    /// Show the complete human key as one soft-wrapped line for manual copy.
+    ShowHumanKey,
+    /// Show the complete MCP/AI key as one soft-wrapped line for manual copy.
+    ShowAiKey,
     /// Scroll the pairing information back (`> 0`) or forward by lines.
     PairingScroll(i32),
     Ignore,
@@ -235,6 +239,8 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Char('a') => Action::PairingToggleAdvanced,
             Key::Char('c') => Action::CopyHumanKey,
             Key::Char('C') => Action::CopyAiKey,
+            Key::Char('v') => Action::ShowHumanKey,
+            Key::Char('V') => Action::ShowAiKey,
             Key::Up => Action::PairingScroll(-1),
             Key::Down => Action::PairingScroll(1),
             Key::PageUp => Action::PairingScroll(-(state.rows().max(1) as i32)),
@@ -699,6 +705,8 @@ mod sharing_input_tests {
             map_key(&state, Key::Char('a')),
             Action::PairingToggleAdvanced
         );
+        assert_eq!(map_key(&state, Key::Char('v')), Action::ShowHumanKey);
+        assert_eq!(map_key(&state, Key::Char('V')), Action::ShowAiKey);
         state.view = View::McpPair;
         assert_eq!(map_key(&state, Key::Char('a')), Action::McpChar('a'));
         state.mcp_pair = Some(McpPairForm::new());

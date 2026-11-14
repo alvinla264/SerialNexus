@@ -224,6 +224,34 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         copied.iter().find(|key| key.starts_with("snx1.ai."))
     );
 
+    // When the terminal ignores OSC 52, `v` shows the complete key as one
+    // logical line that the terminal soft-wraps; copying that line does not
+    // add line breaks. Any key returns to the pairing view.
+    let human = copied
+        .iter()
+        .find(|key| key.starts_with("snx1.human."))
+        .expect("the human key was offered")
+        .clone();
+    tui.send_text("v");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let raw = tui.raw_transcript();
+        if raw
+            .windows(human.len())
+            .any(|window| window == human.as_bytes())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the soft-wrapped key was not shown"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tui.send_text("x");
+    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("Human terminal key");
+
     // `a` shows the older host fields a terminal without keys needs.
     tui.send_text("a");
     tui.wait_for_text("Older host fields");
@@ -362,4 +390,34 @@ fn quitting_the_owner_terminal_closes_the_listener_without_stopping_first() {
             Ok(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// A large paste often arrives in the same kernel read as the keys typed just
+/// before it, with more paste bytes left beyond the 1024-byte read buffer.
+/// crossterm's default mio reader used edge-triggered readiness and returned
+/// after the first parsed event, stranding the rest until another wakeup; the
+/// following Esc was never read and the form stayed open. The `use-dev-tty`
+/// reader is level-triggered and drains the terminal, so the whole paste and
+/// the Esc that follows are processed without any delay or extra keystroke.
+#[test]
+fn a_large_paste_and_the_key_after_it_are_processed_without_another_wakeup() {
+    let fixture = Fixture::new();
+    let mut tui = fixture.tui();
+    tui.wait_for_text("focus: sidebar");
+    tui.send_text("m");
+    tui.wait_for_text("Configure MCP pairing");
+    tui.send_text("127.0.0.1");
+    tui.send(support::tui::KEY_TAB);
+    tui.send_text("7331");
+    tui.send(support::tui::KEY_TAB);
+    // One write: opener, a key longer than the reader's 1024-byte buffer, end
+    // marker. No settle delay.
+    let key = format!("snx1.ai.{}", "A".repeat(2_000));
+    tui.send(format!("\x1b[200~{key}\x1b[201~").as_bytes());
+    // The next input must be read too; otherwise the form never closes.
+    tui.send(support::tui::KEY_ESC);
+    tui.wait_until("the form to close after the paste", |text| {
+        text.contains("focus: sidebar")
+    });
+    tui.quit();
 }

@@ -523,6 +523,8 @@ impl App {
             Action::PairingToggleAdvanced => self.toggle_pairing_advanced(),
             Action::CopyHumanKey => self.copy_pairing_key(PairingRole::Human),
             Action::CopyAiKey => self.copy_pairing_key(PairingRole::Ai),
+            Action::ShowHumanKey => self.show_pairing_key(PairingRole::Human),
+            Action::ShowAiKey => self.show_pairing_key(PairingRole::Ai),
             Action::PairingScroll(delta) => self.scroll_pairing(delta),
             Action::Ignore => {}
         }
@@ -1329,6 +1331,34 @@ impl App {
     /// Take the pending clipboard request, if any.
     pub fn take_clipboard_copy(&mut self) -> Option<ClipboardCopy> {
         self.state.clipboard_copy.take()
+    }
+
+    /// Show one complete key as a single soft-wrapped line, for a terminal
+    /// that ignores the clipboard escape or has it disabled. Selecting a
+    /// soft-wrapped line copies it without inserted newlines in terminals that
+    /// mark wraps (Windows Terminal, xterm, tmux); the key is not saved and
+    /// the view ends on any key.
+    pub fn show_pairing_key(&mut self, role: PairingRole) {
+        let Some(pairing) = &self.state.sharing.pairing else {
+            self.state.notice = Some(Notice::error("sharing is off: start it to show a key"));
+            return;
+        };
+        let secret = match role {
+            PairingRole::Human => &pairing.human,
+            PairingRole::Ai => &pairing.ai,
+        };
+        let label = match role {
+            PairingRole::Human => "human terminal key",
+            PairingRole::Ai => "MCP/AI key",
+        };
+        match SharingKey::encode(&pairing.host, secret) {
+            Ok(key) => self.state.show_key = Some(ClipboardCopy { label, key }),
+            Err(error) => {
+                self.state.notice = Some(Notice::error(format!(
+                    "the {label} could not be built: {error}"
+                )));
+            }
+        }
     }
 
     /// Show or hide the older host fields in the pairing view.

@@ -423,10 +423,15 @@ turns sharing off, so use `p` to inspect it) normally shows the bound address
 and two clearly labelled, distinct **sharing keys**: a human terminal key and an
 MCP/AI key. Each key is one long string that bundles the host certificate
 verification and that role's credential. Treat a key as a password: press `c` to ask the terminal to put the complete
-human key on its clipboard, or `C` for the MCP/AI key (OSC 52; a terminal that
-does not support it ignores the request). The pairing view hard-wraps the key
-across screen rows, so selecting those rows adds line breaks and the receiving
-form refuses the result; use the copy action instead. Never put a key in a
+human key on its clipboard, or `C` for the MCP/AI key (OSC 52; Windows Terminal
+supports copy-through OSC 52 since 1.2). A terminal that ignores or disables
+that escape leaves the clipboard unchanged. In that case press `v` (human) or
+`V` (MCP/AI): the terminal shows the key as one logical line that it soft-wraps
+across rows. Select that whole line and press any key to return; terminals that
+mark wrapped rows (Windows Terminal, xterm, tmux) copy it without inserting
+line breaks. The pairing view's own rows are hard-wrapped, so selecting those
+adds line breaks and the receiving form refuses the result; use `c`/`C` or
+`v`/`V` instead. Never put a key in a
 repository, issue, tool call or shell history. Keys are shown
 only to the owner, are never written to the settings file or a device, and stop
 working when sharing stops or restarts. Press `a` for the **older host fields**

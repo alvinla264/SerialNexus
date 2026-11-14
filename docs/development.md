@@ -152,8 +152,11 @@ Further terminal coverage uses real core/client seams and dedicated PTY flows:
   failed-save paths preserving every other entry.
 - `pty_sharing.rs` and `pty_remote.rs`: the actual rendered and keyboard-driven
   Share/Pairing and Connect workflows, including both labelled keys, the
-  advanced toggle, a whole long key pasted as one bracketed paste, and device
-  access on the host.
+  advanced toggle, a whole long key pasted as one bracketed paste, the
+  soft-wrapped copy fallback, and device access on the host. One test pins the
+  terminal reader's drain invariant: a paste larger than crossterm's 1024-byte
+  buffer followed by Esc must both be processed with no extra wakeup; the
+  terminal uses crossterm's `use-dev-tty` (level-triggered) reader for this.
 - `pty_remote_mcp.rs`: the real MCP binary reaching a remote host through the
   real terminal's gateway, beside two more human clients on the same device:
   discovery and first-open baud on a checked but unopened port, whole

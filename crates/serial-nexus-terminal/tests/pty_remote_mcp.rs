@@ -991,9 +991,7 @@ fn the_terminal_pairing_form_saves_the_file_the_real_mcp_server_uses() {
         terminal.send(KEY_TAB);
         terminal.send_text(&port);
         terminal.send(KEY_TAB);
-        std::thread::sleep(Duration::from_millis(100));
         terminal.send(format!("\x1b[200~{ai_key}\x1b[201~").as_bytes());
-        terminal.wait_for_text("••••");
     };
 
     // Saving the key writes the owner-only file and does not connect.

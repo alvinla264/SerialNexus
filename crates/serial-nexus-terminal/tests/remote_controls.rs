@@ -471,12 +471,18 @@ fn two_hosts_and_the_local_core_coexist_even_with_equal_device_ids() {
 
     // Typing goes only to the shown remote device, even when the highlight is
     // moved to another endpoint's row.
+    // The process-wide test lister also lists the remote PTYs for the local
+    // core, so the first Local row is not necessarily this test's local
+    // device. Choose it by path.
     let local_index = terminal
         .app
         .state
         .devices
         .iter()
-        .position(|device| device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT)
+        .position(|device| {
+            device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT
+                && device.path == local_device.path
+        })
         .expect("local row");
     terminal.app.state.select_index(local_index);
     terminal.app.write_shown(b"R", Key::Char('R'));
@@ -487,14 +493,19 @@ fn two_hosts_and_the_local_core_coexist_even_with_equal_device_ids() {
     );
 
     // The local stream still works.
-    let local_key = terminal
+    let local_key = local_device.path.clone();
+    let local_open = terminal
         .app
         .state
         .devices
         .iter()
-        .find(|device| device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT)
-        .map(|device| device.path.clone())
+        .find(|device| {
+            device.endpoint == serial_nexus_terminal::state::LOCAL_ENDPOINT
+                && device.path == local_key
+        })
         .expect("local path");
+    assert!(local_open.open, "the local device is already open");
+    assert_eq!(local_open.baud, Some(9_600));
     let key = terminal
         .app
         .open_endpoint(

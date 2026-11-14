@@ -700,7 +700,7 @@ impl Default for McpPairForm {
 pub struct ClipboardCopy {
     /// What was copied, for the footer notice.
     pub label: &'static str,
-    /// The complete key string, unchanged and unwrapped.
+    /// The complete key string, unchanged.
     pub key: String,
 }
 
@@ -866,6 +866,10 @@ pub struct AppState {
     /// event loop, which asks the terminal to put it on the clipboard with
     /// OSC 52; nothing here touches the settings file or a device.
     pub clipboard_copy: Option<ClipboardCopy>,
+    /// A key asked for as one raw, soft-wrapped line, for terminals where the
+    /// clipboard escape is unavailable. The event loop shows it until a key is
+    /// pressed, then clears it.
+    pub show_key: Option<ClipboardCopy>,
     rows: usize,
     cols: usize,
 }
@@ -902,6 +906,7 @@ impl AppState {
             mcp_pair: None,
             pairing_advanced: false,
             clipboard_copy: None,
+            show_key: None,
             rows: rows.max(1),
             cols: cols.max(1),
         }
