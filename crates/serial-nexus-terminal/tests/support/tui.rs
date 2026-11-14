@@ -307,9 +307,12 @@ impl TuiSession {
     }
 
     fn shutdown(mut self) -> Vec<u8> {
-        // Ctrl+] twice returns the focus to the sidebar whatever pane has it.
-        self.send(KEY_CTRL_BRACKET);
-        self.send(KEY_CTRL_BRACKET);
+        // Ctrl+] toggles focus, so send it only when the right pane has it;
+        // Ctrl+Q quits only from the sidebar. The focus footer is visible at
+        // the sizes tests quit at.
+        if !self.text().contains("focus: sidebar") {
+            self.send(KEY_CTRL_BRACKET);
+        }
         self.send(KEY_CTRL_Q);
         let deadline = Instant::now() + Duration::from_secs(2);
         let status = loop {

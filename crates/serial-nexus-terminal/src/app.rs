@@ -1343,10 +1343,14 @@ impl App {
         let Some(key) = self.pairing_key(role) else {
             return;
         };
-        // Three header/hint rows and the key's own wrapped rows.
-        let columns = self.state.cols().max(1);
-        let rows = key.key.len().div_ceil(columns) + 4;
-        if rows > self.state.rows() {
+        // The copy view uses the whole terminal, not the stream pane, so the
+        // fit decision uses the whole terminal too. Outside a TTY (unit
+        // tests) fall back to the stored dimensions.
+        let (columns, rows) = crossterm::terminal::size()
+            .map(|(columns, rows)| (columns as usize, rows as usize))
+            .unwrap_or((self.state.cols(), self.state.rows()));
+        let key_rows = key.key.len().div_ceil(columns.max(1)) + 4;
+        if key_rows > rows {
             self.state.notice = Some(Notice::info(format!(
                 "this pane is too short to show the whole {}; enlarge the terminal and press v or V again",
                 key.label

@@ -160,6 +160,47 @@ fn set_port_zero(tui: &mut TuiSession) {
 }
 
 #[test]
+fn v_shows_a_whole_key_in_an_ordinary_80x24_split_pane() {
+    let fixture = Fixture::new();
+    let path = fixture.device.path.clone();
+    let mut tui = fixture.tui();
+    tui.wait_for_text(&path);
+    open_settings(&mut tui);
+    check_device(&mut tui, &path);
+    set_port_zero(&mut tui);
+    tui.send(KEY_CTRL_S);
+    tui.wait_for_text("settings saved");
+    tui.send(KEY_CTRL_BRACKET);
+    tui.wait_for_text("focus: sidebar");
+    // Configure at the usual size, then start sharing in a real 80x24
+    // terminal, where the stream pane is much narrower than the copy view.
+    tui.resize(24, 80);
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send_text("s");
+    tui.wait_for_text("Human terminal key");
+    tui.send_text("v");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !tui
+        .raw_transcript()
+        .windows("snx1.human.".len())
+        .any(|window| window == b"snx1.human.")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a 80x24 terminal shows the whole key: {}",
+            tui.text()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tui.send_text("x");
+    tui.wait_for_text("Human terminal key");
+    // Quit at a size where the focus footer is visible.
+    tui.resize(ROWS, COLS);
+    tui.wait_for_text("focus: pairing");
+    tui.quit();
+}
+
+#[test]
 fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() {
     let fixture = Fixture::new();
     let path = fixture.device.path.clone();
