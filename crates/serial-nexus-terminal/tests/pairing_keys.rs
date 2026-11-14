@@ -18,7 +18,7 @@ use serial_nexus_protocol::{PairingRole, ShareSessionInfo, SharingKey};
 use serial_nexus_terminal::app::App;
 use serial_nexus_terminal::input::Key;
 use serial_nexus_terminal::settings::SettingsStore;
-use serial_nexus_terminal::state::{FormMode, View};
+use serial_nexus_terminal::state::{FormMode, McpField, View};
 use support::{connect, start_core, PortListerGuard, SimulatedDevice};
 use tempfile::TempDir;
 
@@ -253,6 +253,47 @@ fn a_human_key_pairs_and_wrong_role_host_or_format_is_refused_without_dialling()
     assert!(terminal.app.state.devices.iter().any(|entry| entry.endpoint
         != serial_nexus_terminal::state::LOCAL_ENDPOINT
         && entry.path == device.path));
+    terminal.app.shutdown();
+}
+
+#[test]
+fn an_unbracketed_invalid_mcp_key_blocks_the_save() {
+    let _guard = serial_test();
+    let device = SimulatedDevice::new();
+    let host = start_host(&device);
+    let (_local, socket) = start_core(Duration::from_secs(30), Duration::from_secs(300), 500);
+    let mut terminal = Terminal::new(&socket);
+    let peers = terminal.peers.clone();
+
+    terminal.app.start_mcp_pair();
+    let key = ai_key(&host.info);
+    let form = terminal.app.state.mcp_pair.as_mut().expect("form");
+    form.address = address_of(&host.info);
+    form.port = host.info.host.address.port().to_string();
+    form.field = McpField::Key;
+    terminal.app.handle_paste(&key[..20]);
+    for invalid in [' ', '\u{00a0}'] {
+        terminal.app.handle_key(Key::Char(invalid));
+    }
+    let form = terminal.app.state.mcp_pair.as_ref().expect("form");
+    assert!(form.key_invalid, "an invalid character is remembered");
+    assert_eq!(
+        form.key,
+        key[..20],
+        "the invalid characters are not dropped"
+    );
+
+    terminal.app.submit_mcp_pair();
+    let form = terminal.app.state.mcp_pair.as_ref().expect("form stays");
+    assert!(
+        form.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("invalid character"),
+        "{:?}",
+        form.error
+    );
+    assert!(!peers.exists(), "nothing was saved");
     terminal.app.shutdown();
 }
 

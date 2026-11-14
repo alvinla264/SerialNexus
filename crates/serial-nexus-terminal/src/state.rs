@@ -632,8 +632,16 @@ impl McpPairForm {
         }
     }
 
+    /// Type one character, strict for the MCP/AI key: an invalid character is
+    /// reported and blocks saving instead of being trimmed away.
     pub fn push(&mut self, ch: char) {
-        self.push_str(&ch.to_string());
+        let strict = self.field == McpField::Key;
+        let result = type_into(self.field.text_mut(self), strict, ch);
+        if strict && result.is_err() {
+            self.key_invalid = true;
+        }
+        self.error = result.err().map(str::to_string);
+        self.confirm_replace = false;
     }
 
     /// Insert text as one action, strict for the AI key: a key is inserted
