@@ -46,16 +46,17 @@ MCP-over-stdio pairing-file path against the same existing board echo firmware.
 
 ## Run
 
-Use the exact PR head, never a local edit:
+Use the coordinator's reviewed local head, never a local edit and never a
+fetched PR: this work is merged locally, not through a pull request.
 
 ```sh
-git fetch origin pull/9/head:pr-9
-git checkout pr-9
-git rev-parse HEAD                      # record this as the gated SHA
-
-nix shell nixpkgs#cargo nixpkgs#rustc -c \
-  cargo build --release -p serial-nexus-core -p serial-nexus-client
+git rev-parse HEAD                      # must equal the reviewed SHA; record it
+git status --short                      # must be empty
+nix develop -c cargo build --release --locked
 ```
+
+Run every gate below on that same SHA. If HEAD changes, repeat the checks,
+reviews and gates; record the gated SHA and results before publishing.
 
 Read-only gate (sends nothing to the board):
 
