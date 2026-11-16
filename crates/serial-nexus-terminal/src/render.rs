@@ -144,6 +144,7 @@ pub fn stream_body_area(area: Rect) -> Option<Rect> {
 pub struct Sidebar {
     pub title: Rect,
     pub list: Rect,
+    pub dismiss: Rect,
     pub share: Rect,
     pub connect: Rect,
     pub button: Rect,
@@ -151,17 +152,24 @@ pub struct Sidebar {
 
 /// Where the sidebar puts its parts inside `rect`, or `None` when there is no
 /// room.
-pub(crate) fn available_sidebar_buttons(rows: usize, cols: usize) -> Vec<SidebarButton> {
+pub(crate) fn available_sidebar_buttons(
+    rows: usize,
+    cols: usize,
+    has_warning: bool,
+) -> Vec<SidebarButton> {
     let rect = Rect::new(
         0,
         0,
         cols.min(u16::MAX as usize) as u16,
         rows.min(u16::MAX as usize) as u16,
     );
-    let Some(layout) = sidebar(rect) else {
+    let Some(layout) = sidebar_with_warning(rect, has_warning) else {
         return Vec::new();
     };
     let mut buttons = Vec::new();
+    if layout.dismiss.height > 0 {
+        buttons.push(SidebarButton::Dismiss);
+    }
     if layout.share.height > 0 {
         buttons.push(SidebarButton::Share);
     }
@@ -175,6 +183,10 @@ pub(crate) fn available_sidebar_buttons(rows: usize, cols: usize) -> Vec<Sidebar
 }
 
 pub fn sidebar(rect: Rect) -> Option<Sidebar> {
+    sidebar_with_warning(rect, false)
+}
+
+pub fn sidebar_with_warning(rect: Rect, has_warning: bool) -> Option<Sidebar> {
     if rect.height < 2 || rect.width < 8 {
         return None;
     }
@@ -183,20 +195,38 @@ pub fn sidebar(rect: Rect) -> Option<Sidebar> {
     let bottom = rect.y + rect.height - 1;
     let button = Rect::new(rect.x, bottom, rect.width, 1);
     // Short sidebars give rows to the controls first. Settings survives at the
-    // old two-row minimum; Share and Connect appear once there is room.
-    let (share, connect, list_height) = if rect.height >= 4 {
+    // old two-row minimum; Share, Connect and the warning's Dismiss entry
+    // appear only when there is room. Which controls exist is decided from the
+    // same layout by `available_sidebar_buttons`, so drawing, clicking and the
+    // arrow keys never disagree.
+    let (mut dismiss, share, connect, list_height) = if has_warning && rect.height >= 5 {
         (
+            Rect::new(rect.x, bottom - 3, rect.width, 1),
+            Rect::new(rect.x, bottom - 2, rect.width, 1),
+            Rect::new(rect.x, bottom - 1, rect.width, 1),
+            rect.height - 5,
+        )
+    } else if rect.height >= 4 {
+        (
+            empty,
             Rect::new(rect.x, bottom - 2, rect.width, 1),
             Rect::new(rect.x, bottom - 1, rect.width, 1),
             rect.height - 4,
         )
     } else {
-        (empty, empty, rect.height - 2)
+        (empty, empty, empty, rect.height - 2)
     };
     let list = Rect::new(rect.x, rect.y + 1, rect.width, list_height);
+    // A genuinely short sidebar still offers a mouse target for a serious
+    // warning. At three rows the spare list row is it; with only a title and
+    // Settings, the title row becomes the Dismiss button.
+    if has_warning && dismiss.height == 0 {
+        dismiss = if rect.height == 3 { list } else { title };
+    }
     Some(Sidebar {
         title,
         list,
+        dismiss,
         share,
         connect,
         button,
@@ -317,9 +347,146 @@ fn settings_first_row(state: &AppState, layout: SettingsLayout) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     Device(usize),
+    Dismiss,
     Share,
     Connect,
     Settings,
+}
+
+/// Where the Share page puts its parts inside the right pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShareLayout {
+    pub title: Rect,
+    /// The editable rows and explicit buttons.
+    pub form: Rect,
+    /// The running session's keys and advanced host fields.
+    pub details: Rect,
+    /// The in-form reason a save or start was refused.
+    pub error: Option<Rect>,
+    pub hints: Rect,
+}
+
+fn share_layout(state: &AppState, right: Rect) -> Option<ShareLayout> {
+    if right.height < 2 || right.width < 12 {
+        return None;
+    }
+    let title_height = if right.height >= 3 { 1 } else { 0 };
+    let hints_height = if right.height >= 5 { 1 } else { 0 };
+    let error_height = u16::from(state.share_error.is_some() && right.height >= 2);
+    let content_height = right
+        .height
+        .saturating_sub(title_height + hints_height + error_height);
+    let rows = state.share_rows().len() as u16;
+    // Saving all the controls must never make the keys unreachable. While a
+    // session is running, reserve at least three rows for its keys/details;
+    // the form scrolls to keep the selected row visible.
+    let detail_reserve = if state.sharing.active && state.sharing.pairing.is_some() {
+        content_height.saturating_sub(1).min(3)
+    } else {
+        0
+    };
+    let form_height = rows.min(content_height.saturating_sub(detail_reserve).max(1));
+    let title = Rect::new(right.x, right.y, right.width, title_height);
+    let form = Rect::new(right.x, right.y + title_height, right.width, form_height);
+    let details_y = form.y + form.height;
+    let error = (error_height > 0).then(|| {
+        Rect::new(
+            right.x,
+            right.y + title_height + content_height,
+            right.width,
+            1,
+        )
+    });
+    let details_height = content_height.saturating_sub(form_height);
+    let details = Rect::new(right.x, details_y, right.width, details_height);
+    let hints = Rect::new(
+        right.x,
+        right.y + right.height - hints_height,
+        right.width,
+        hints_height,
+    );
+    Some(ShareLayout {
+        title,
+        form,
+        details,
+        error,
+        hints,
+    })
+}
+
+/// Whether a serious warning's compact Dismiss target shares the selected
+/// device's list row, so keyboard activation must dismiss instead of opening
+/// the device hidden under the label.
+pub fn short_warning_shares_list(rows: usize, cols: usize) -> bool {
+    // Callers pass the body/sidebar dimensions, not the whole terminal, so
+    // this must not subtract the chrome a second time.
+    let sidebar = Rect::new(
+        0,
+        0,
+        cols.min(u16::MAX as usize) as u16,
+        rows.min(u16::MAX as usize) as u16,
+    );
+    let Some(layout) = sidebar_with_warning(sidebar, true) else {
+        return false;
+    };
+    layout.dismiss.height > 0
+        && layout.list.height > 0
+        && layout.dismiss.y >= layout.list.y
+        && layout.dismiss.y < layout.list.y + layout.list.height
+}
+
+/// Which Share-page area a mouse wheel notch is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareWheel {
+    Form,
+    Details,
+}
+
+/// Resolve a wheel notch's pointer to the Share form or its key/details area.
+pub fn share_wheel_target(
+    state: &AppState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<ShareWheel> {
+    let layout = share_layout(state, panes(area).right)?;
+    if in_rect(layout.form, column, row) {
+        Some(ShareWheel::Form)
+    } else if in_rect(layout.details, column, row) {
+        Some(ShareWheel::Details)
+    } else {
+        None
+    }
+}
+
+/// Hit test one click in the Share page's form. Returns the row index in
+/// `AppState::share_rows`.
+pub fn share_hit_test(state: &AppState, right: Rect, column: u16, row: u16) -> Option<usize> {
+    let layout = share_layout(state, right)?;
+    // An error drawn over the last content row is not a hidden button.
+    if layout.error.is_none()
+        && state.share_error.is_some()
+        && right.height > 0
+        && row == right.y + right.height - 1
+    {
+        return None;
+    }
+    if !in_rect(layout.form, column, row) {
+        return None;
+    }
+    let first = share_first_row(state, layout.form.height as usize);
+    let index = first + (row - layout.form.y) as usize;
+    (index < state.share_rows().len()).then_some(index)
+}
+
+fn share_first_row(state: &AppState, visible: usize) -> usize {
+    let rows = state.share_rows().len().max(1);
+    let visible = visible.max(1);
+    state
+        .share_row
+        .min(rows - 1)
+        .saturating_sub(visible.saturating_sub(1))
+        .min(rows.saturating_sub(visible))
 }
 
 /// Hit test one click against the sidebar as it is drawn. The sidebar takes
@@ -330,9 +497,12 @@ pub fn hit_test(state: &AppState, area: Rect, column: u16, row: u16) -> Option<H
     if !panes.split && state.focus != Focus::Sidebar {
         return None;
     }
-    let sidebar = sidebar(panes.sidebar)?;
+    let sidebar = sidebar_with_warning(panes.sidebar, state.has_warning())?;
     if in_rect(sidebar.button, column, row) {
         return Some(Hit::Settings);
+    }
+    if in_rect(sidebar.dismiss, column, row) {
+        return Some(Hit::Dismiss);
     }
     if in_rect(sidebar.share, column, row) {
         return Some(Hit::Share);
@@ -452,7 +622,7 @@ fn draw_right(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16,
         View::Stream => draw_stream(state, buffer, area),
         View::Scrollback => draw_stream(state, buffer, area),
         View::Settings => draw_settings(state, buffer, area),
-        View::Pairing => draw_pairing(state, buffer, area),
+        View::Share => draw_share(state, buffer, area),
         View::Connect => draw_connect(state, buffer, area),
         View::McpPair => draw_mcp_pair(state, buffer, area),
     }
@@ -501,7 +671,7 @@ fn draw_header(state: &AppState, buffer: &mut Buffer, area: Rect) {
         (Focus::Right, View::Stream) => "focus: stream",
         (Focus::Right, View::Settings) => "focus: settings",
         (Focus::Right, View::Scrollback) => "focus: scrollback",
-        (Focus::Right, View::Pairing) => "focus: pairing",
+        (Focus::Right, View::Share) => "focus: share",
         (Focus::Right, View::Connect) => "focus: connect",
         (Focus::Right, View::McpPair) => "focus: MCP pairing",
     };
@@ -562,7 +732,7 @@ fn draw_header(state: &AppState, buffer: &mut Buffer, area: Rect) {
 /// devices than fit. The highlighted row and the row shown in the right pane
 /// are marked differently, so choosing a row never looks like switching.
 fn draw_sidebar(state: &AppState, buffer: &mut Buffer, rect: Rect) -> Option<(u16, u16)> {
-    let sidebar = sidebar(rect)?;
+    let sidebar = sidebar_with_warning(rect, state.has_warning())?;
     let list = sidebar.list;
     let empty_endpoints = state.empty_remote_endpoints();
     let empty_remote_tags: Vec<String> = empty_endpoints
@@ -698,25 +868,29 @@ fn draw_sidebar(state: &AppState, buffer: &mut Buffer, rect: Rect) -> Option<(u1
         }
     }
 
-    // The three buttons are real rows: selected with the arrow keys and
-    // clickable with the mouse.
+    // The buttons are real rows: selected with the arrow keys and clickable
+    // with the mouse. A serious warning adds an explicit Dismiss row.
+    let mut cursor = draw_sidebar_button(
+        buffer,
+        sidebar.dismiss,
+        state.selected_button() == Some(SidebarButton::Dismiss),
+        "[ Dismiss warning ]",
+        "x dismiss",
+    );
     let share_selected = state.selected_button() == Some(SidebarButton::Share);
     let share_label = if state.sharing.active {
         "[ Share: on ]"
     } else {
         "[ Share: off ]"
     };
-    let mut cursor = draw_sidebar_button(
+    cursor = draw_sidebar_button(
         buffer,
         sidebar.share,
         share_selected,
         share_label,
-        if state.sharing.active {
-            "p pairing · s stops"
-        } else {
-            "Enter starts · s"
-        },
-    );
+        "Enter opens · s",
+    )
+    .or(cursor);
     cursor = draw_sidebar_button(
         buffer,
         sidebar.connect,
@@ -856,8 +1030,8 @@ fn draw_settings(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u
     Some((column, layout.rows.y + (row - first) as u16))
 }
 
-/// The pairing view's text, before wrapping. Bounded and secret-bearing: only
-/// the owner's pairing view draws it.
+/// The Share page's key text, before wrapping. Bounded and secret-bearing:
+/// only the owner's Share page draws it.
 ///
 /// The normal view shows two labelled, distinct sharing keys, one per role.
 /// The advanced view shows the separate host certificate, fingerprint and
@@ -918,7 +1092,7 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
                 lines.push(format!("  {ai}"));
             }
             _ => lines.push(
-                "Sharing keys are unavailable for this session; press a for the older host fields."
+                "Sharing keys are unavailable for this session; use the Advanced row for older host fields."
                     .to_string(),
             ),
         }
@@ -938,20 +1112,47 @@ fn pairing_lines(state: &AppState) -> Vec<String> {
             .to_string(),
     );
     lines.push(
-        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Press c to copy the complete human key, or C for the MCP/AI key."
+        "A key here is hard-wrapped; selecting those rows adds line breaks and will be refused. Use the visible Copy buttons for the complete keys."
             .to_string(),
     );
     lines.push(
-        "If the terminal ignores the clipboard escape (OSC 52 disabled), press v or V to show one key as a single soft-wrapped line: select that line, then press any key. Enlarge the pane first if it is too short for the whole line."
+        "If the terminal ignores the clipboard escape (OSC 52 disabled), use a visible Show key button to display one key as a single soft-wrapped line: select that line, then press any key. Enlarge the pane first if it is too short for the whole line."
             .to_string(),
     );
     if state.pairing_advanced {
-        lines.push("Esc back · a hide older fields · s stops sharing · ↑/↓ scroll".to_string());
+        lines.push(
+            "Esc back · Enter shows/hides older fields · PageUp/PageDown or wheel scrolls the details"
+                .to_string(),
+        );
     } else {
-        lines.push("Esc back · a older host fields · s stops sharing · ↑/↓ scroll".to_string());
+        lines.push(
+            "Esc back · Enter opens older host fields · PageUp/PageDown or wheel scrolls the details"
+                .to_string(),
+        );
     }
 
     lines
+}
+
+/// The highest useful scroll offset for the Share page's key/details area,
+/// sized to the pane it is actually drawn in.
+pub fn share_max_scroll(state: &AppState) -> usize {
+    // AppState's rows/cols are already the right-pane size.
+    let right = Rect::new(
+        0,
+        0,
+        state.cols().min(u16::MAX as usize) as u16,
+        state.rows().min(u16::MAX as usize) as u16,
+    );
+    let Some(layout) = share_layout(state, right) else {
+        return 0;
+    };
+    let width = layout.details.width.max(1) as usize;
+    let lines = pairing_lines(state)
+        .iter()
+        .flat_map(|line| wrap_line(line, width))
+        .count();
+    lines.saturating_sub(layout.details.height.max(1) as usize)
 }
 
 /// The highest useful pairing scroll offset for the current pane size. Keeping
@@ -965,41 +1166,224 @@ pub fn pairing_max_scroll(state: &AppState) -> usize {
     lines.saturating_sub(state.rows().max(1))
 }
 
-/// The owner's pairing view: the reachable address, what authenticates the
-/// host, and the two separate pairing credentials. The secrets exist only in
-/// this session's memory and are drawn only here.
-fn draw_pairing(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16, u16)> {
-    if state.sharing.pairing.is_none() {
-        let message = if state.sharing.active {
-            "Sharing is on, but its pairing information was lost with a failed answer. Press s to stop, then start again for fresh credentials."
-        } else {
-            "Sharing is off: press s or use the Share button to start it."
-        };
-        put(buffer, area, 1, message, dim());
-        return Some((area.x + 1, area.y));
-    }
-    let lines = pairing_lines(state);
-    let width = area.width.max(1) as usize;
-    let wrapped: Vec<String> = lines
-        .iter()
-        .flat_map(|line| wrap_line(line, width))
-        .collect();
-    let height = area.height.max(1) as usize;
-    let max_first = wrapped.len().saturating_sub(height);
-    let first = state.pairing_scroll.min(max_first);
-    for row in 0..height {
-        let Some(text) = wrapped.get(first + row) else {
-            break;
-        };
+/// The owner's Share page: the address, port and device checklist with
+/// explicit Start/Stop controls, then the running session's keys. Opening the
+/// page never acts; every network action is a separate button that may need a
+/// second, explicit confirmation.
+fn draw_share(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16, u16)> {
+    let Some(layout) = share_layout(state, area) else {
         put(
             buffer,
-            Rect::new(area.x, area.y + row as u16, area.width, 1),
+            area,
             0,
-            text,
-            RStyle::default(),
+            " Esc back · widen the pane to share ",
+            dim(),
+        );
+        return None;
+    };
+    if layout.title.height > 0 {
+        let title = if state.sharing.active {
+            format!(
+                " Share · on {} ",
+                state
+                    .sharing
+                    .pairing
+                    .as_ref()
+                    .map(|pairing| pairing.bind.to_string())
+                    .or_else(|| state
+                        .sharing
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.bind)
+                        .map(|bind| bind.to_string()))
+                    .unwrap_or_else(|| "running".to_string())
+            )
+        } else {
+            " Share · off ".to_string()
+        };
+        let title_style = focus_title_style(state.focus == Focus::Right);
+        put(buffer, layout.title, 0, &title, title_style);
+    }
+    let rows = state.share_rows();
+    let first = share_first_row(state, layout.form.height as usize);
+    let mut cursor = None;
+    for (offset, (index, row)) in rows.iter().enumerate().skip(first).enumerate() {
+        if offset >= layout.form.height as usize {
+            break;
+        }
+        let selected = index == state.share_row;
+        let marker = if selected { "▸" } else { " " };
+        let line = Rect::new(
+            layout.form.x,
+            layout.form.y + offset as u16,
+            layout.form.width,
+            1,
+        );
+        let text = match row {
+            crate::state::ShareRow::Address => {
+                let value = if state.share_editing && selected {
+                    format!("{}│", state.draft.share_address)
+                } else {
+                    state.draft.share_address.clone()
+                };
+                row_text(
+                    &format!("{marker} Host address"),
+                    &value,
+                    line.width as usize,
+                    RowOverflow::Value,
+                )
+            }
+            crate::state::ShareRow::Port => {
+                let value = if state.share_editing && selected {
+                    format!("{}│", state.port_text)
+                } else {
+                    state.port_text.clone()
+                };
+                row_text(
+                    &format!("{marker} Port"),
+                    &value,
+                    line.width as usize,
+                    RowOverflow::Value,
+                )
+            }
+            crate::state::ShareRow::Device(device_index) => {
+                let path = state
+                    .devices
+                    .get(*device_index)
+                    .map(|device| device.path.as_str())
+                    .unwrap_or("");
+                let checkbox = if state.draft_checked.contains(path) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                format!("{marker} {checkbox} {path}")
+            }
+            crate::state::ShareRow::StartStop => {
+                let label = if state.sharing.active {
+                    if state.share_confirm == Some(crate::state::ShareConfirm::Stop) {
+                        "[ Confirm stop ]"
+                    } else {
+                        "[ Stop sharing ]"
+                    }
+                } else if state.has_unsaved_share() {
+                    if state.share_confirm == Some(crate::state::ShareConfirm::Start) {
+                        "[ Save and start ]"
+                    } else {
+                        "[ Start sharing ]"
+                    }
+                } else {
+                    "[ Start sharing ]"
+                };
+                format!(
+                    "{marker} {label}  {}",
+                    if state.sharing.active {
+                        "disconnects every remote client"
+                    } else {
+                        "listens only on the address above"
+                    }
+                )
+            }
+            crate::state::ShareRow::Save => format!("{marker} [ Save ]"),
+            crate::state::ShareRow::Cancel => format!("{marker} [ Cancel ]"),
+            crate::state::ShareRow::CopyHuman => format!("{marker} [ Copy human key ]"),
+            crate::state::ShareRow::CopyAi => format!("{marker} [ Copy MCP/AI key ]"),
+            crate::state::ShareRow::ShowHuman => format!("{marker} [ Show human key ]"),
+            crate::state::ShareRow::ShowAi => format!("{marker} [ Show MCP/AI key ]"),
+            crate::state::ShareRow::Advanced => {
+                if state.pairing_advanced {
+                    format!("{marker} [ Hide older host fields ]")
+                } else {
+                    format!("{marker} [ Older host fields ]")
+                }
+            }
+        };
+        let style = if selected {
+            highlighted(true)
+        } else {
+            RStyle::default()
+        };
+        put(buffer, line, 0, &text, style);
+        if selected {
+            cursor = Some((line.x + 1, line.y));
+        }
+    }
+    if layout.details.height > 0 {
+        if state.sharing.active && state.sharing.pairing.is_some() {
+            let lines = pairing_lines(state);
+            let width = layout.details.width.max(1) as usize;
+            let wrapped: Vec<String> = lines
+                .iter()
+                .flat_map(|line| wrap_line(line, width))
+                .collect();
+            let height = layout.details.height as usize;
+            let max_first = wrapped.len().saturating_sub(height);
+            let first_detail = state.pairing_scroll.min(max_first);
+            for row in 0..height {
+                let Some(text) = wrapped.get(first_detail + row) else {
+                    break;
+                };
+                put(
+                    buffer,
+                    Rect::new(
+                        layout.details.x,
+                        layout.details.y + row as u16,
+                        layout.details.width,
+                        1,
+                    ),
+                    0,
+                    text,
+                    RStyle::default(),
+                );
+            }
+        } else {
+            put(
+                buffer,
+                layout.details,
+                0,
+                "Check at least one local device, then Start sharing. Nothing listens until you do.",
+                dim(),
+            );
+        }
+    }
+    let error_style = RStyle::default().fg(RColor::White).bg(RColor::Red);
+    let mut error_shown = false;
+    if let Some(error) = layout.error {
+        put(
+            buffer,
+            error,
+            0,
+            &format!(" {} ", state.share_error.as_deref().unwrap_or_default()),
+            error_style,
+        );
+        error_shown = true;
+    } else if let Some(error) = &state.share_error {
+        // A short page has no dedicated error row; the hint row carries the
+        // failure instead of hiding it.
+        if layout.hints.height > 0 {
+            put(buffer, layout.hints, 0, &format!(" {error} "), error_style);
+            error_shown = true;
+        } else if area.height > 0 {
+            put(
+                buffer,
+                Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+                0,
+                &format!(" {error} "),
+                error_style,
+            );
+            error_shown = true;
+        }
+    }
+    if layout.hints.height > 0 && !error_shown {
+        put(
+            buffer,
+            layout.hints,
+            0,
+            " ↑/↓ select · Enter edit or activate · Space toggle · Esc back ",
+            dim(),
         );
     }
-    Some((area.x, area.y))
+    cursor.or(Some((area.x + 1, area.y)))
 }
 
 /// Split one line into display-width-bounded pieces, never in the middle of a
@@ -1024,32 +1408,250 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     pieces
 }
 
+/// What a click in the Connect page landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectHit {
+    Field(ConnectField),
+    Connect,
+    ClearKey,
+    Cancel,
+    ToggleMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConnectLayout {
+    title: Rect,
+    fields: Rect,
+    bar: Rect,
+    error: Option<Rect>,
+    hints: Rect,
+}
+
+fn connect_layout(state: &AppState, right: Rect) -> Option<ConnectLayout> {
+    if right.height < 1 || right.width < 12 {
+        return None;
+    }
+    let hints_height = if right.height >= 6 { 1 } else { 0 };
+    let title_height = if right.height >= 4 { 1 } else { 0 };
+    // The action bar never clips a control: one row when it fits, then two,
+    // then one full-width row per button on a genuinely narrow pane.
+    let bar_height = if right.height >= 5 {
+        let rows = if right.width >= 48 {
+            1
+        } else if right.width >= 38 {
+            2
+        } else {
+            4
+        };
+        rows.min(right.height.saturating_sub(1))
+    } else {
+        0
+    };
+    let error_height = u16::from(
+        state
+            .connect
+            .as_ref()
+            .is_some_and(|form| form.error.is_some())
+            && right.height >= 2,
+    );
+    let reserved = title_height + bar_height + hints_height + error_height;
+    let fields_height = right.height.saturating_sub(reserved).max(1);
+    let title = Rect::new(right.x, right.y, right.width, title_height);
+    let fields = Rect::new(right.x, right.y + title_height, right.width, fields_height);
+    let error = (error_height > 0).then(|| {
+        Rect::new(
+            right.x,
+            right.y + title_height + fields_height,
+            right.width,
+            1,
+        )
+    });
+    let bar_y = title_height + fields_height + error_height;
+    let bar = Rect::new(right.x, right.y + bar_y, right.width, bar_height);
+    let hints = Rect::new(
+        right.x,
+        right.y + right.height - hints_height,
+        right.width,
+        hints_height,
+    );
+    Some(ConnectLayout {
+        title,
+        fields,
+        bar,
+        error,
+        hints,
+    })
+}
+
+/// The first Connect field the pane shows, so the selected field stays in
+/// view when the terminal is short.
+fn connect_first_field(state: &AppState, visible: usize) -> usize {
+    let Some(form) = state.connect.as_ref() else {
+        return 0;
+    };
+    let fields = form.fields();
+    let selected = fields
+        .iter()
+        .position(|field| *field == form.field)
+        .unwrap_or(0);
+    let visible = visible.max(1);
+    selected
+        .saturating_sub(visible - 1)
+        .min(fields.len().saturating_sub(visible))
+}
+
+/// Hit test one click in the Connect page.
+pub fn connect_hit_test(
+    state: &AppState,
+    right: Rect,
+    column: u16,
+    row: u16,
+) -> Option<ConnectHit> {
+    let form = state.connect.as_ref()?;
+    let layout = connect_layout(state, right)?;
+    if in_rect(layout.fields, column, row) {
+        let first = connect_first_field(state, layout.fields.height as usize);
+        let index = first + (row - layout.fields.y) as usize;
+        return form.fields().get(index).copied().map(ConnectHit::Field);
+    }
+    if !in_rect(layout.bar, column, row) {
+        return None;
+    }
+    // Offsets are the same as the drawn buttons, so a click always matches a
+    // visible label.
+    let offset = column.saturating_sub(layout.bar.x);
+    if layout.bar.height >= 4 {
+        return Some(match row.saturating_sub(layout.bar.y) {
+            0 => ConnectHit::Connect,
+            1 => ConnectHit::ClearKey,
+            2 => ConnectHit::Cancel,
+            _ => ConnectHit::ToggleMode,
+        });
+    }
+    if layout.bar.height == 2 {
+        if row == layout.bar.y + 1 {
+            return Some(ConnectHit::ToggleMode);
+        }
+        return Some(if offset < 13 {
+            ConnectHit::Connect
+        } else if offset < 28 {
+            ConnectHit::ClearKey
+        } else {
+            ConnectHit::Cancel
+        });
+    }
+    if offset < 12 {
+        Some(ConnectHit::Connect)
+    } else if offset < 28 {
+        Some(ConnectHit::ClearKey)
+    } else if offset < 40 {
+        Some(ConnectHit::Cancel)
+    } else {
+        Some(ConnectHit::ToggleMode)
+    }
+}
+
 /// The remote-connect form: address, port and one sharing key in its normal
 /// mode, or the older host fields in advanced mode. The key and credential are
-/// masked; nothing here is written anywhere.
+/// masked; nothing here is written anywhere and no connection happens until
+/// the explicit Connect button (or Enter) is used.
 fn draw_connect(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16, u16)> {
     let Some(form) = &state.connect else {
         put(buffer, area, 1, "Press c or use the Connect button.", dim());
         return Some((area.x + 1, area.y));
     };
-    let title = match form.mode {
-        FormMode::Key => " Connect · sharing key ",
-        FormMode::Advanced => " Connect · older host fields (Ctrl+A for a key) ",
+    let Some(layout) = connect_layout(state, area) else {
+        put(
+            buffer,
+            area,
+            0,
+            " Esc cancels · widen the pane to connect ",
+            dim(),
+        );
+        return None;
     };
-    let fields: Vec<(ConnectField, &'static str, String)> = form
-        .fields()
+    if layout.title.height > 0 {
+        let title = match form.mode {
+            FormMode::Key => " Connect · sharing key ",
+            FormMode::Advanced => " Connect · older host fields (Ctrl+A for a key) ",
+        };
+        let title_style = focus_title_style(state.focus == Focus::Right);
+        put(buffer, layout.title, 0, title, title_style);
+    }
+    let fields = form.fields();
+    let mut cursor = None;
+    let first = connect_first_field(state, layout.fields.height as usize);
+    for (offset, field) in fields
         .iter()
-        .map(|field| (*field, field.name(), form.value(*field)))
-        .collect();
-    draw_form(
-        state,
-        buffer,
-        area,
-        title,
-        &fields,
-        form.field,
-        form.error.as_deref(),
-    )
+        .enumerate()
+        .skip(first)
+        .take(layout.fields.height as usize)
+    {
+        let selected = *field == form.field;
+        let marker = if selected { "▸" } else { " " };
+        let line = Rect::new(
+            layout.fields.x,
+            layout.fields.y + offset.saturating_sub(first) as u16,
+            layout.fields.width,
+            1,
+        );
+        let text = row_text(
+            &format!("{marker} {}", field.name()),
+            &form.value(*field),
+            line.width as usize,
+            RowOverflow::Tail,
+        );
+        put(buffer, line, 0, &text, highlighted(selected));
+        if selected {
+            let column = display_width(&text).min(line.width).saturating_sub(1);
+            cursor = Some((line.x + column, line.y));
+        }
+    }
+    if layout.bar.height > 0 {
+        let rows: &[&str] = match layout.bar.height {
+            1 => &["[ Connect ]  [ Clear key ]  [ Cancel ]  [ Older fields ]"],
+            2 => &["[ Connect ]  [ Clear key ]  [ Cancel ]", "[ Older fields ]"],
+            _ => &[
+                "[ Connect ]",
+                "[ Clear key ]",
+                "[ Cancel ]",
+                "[ Older fields ]",
+            ],
+        };
+        for (offset, text) in rows.iter().enumerate() {
+            put(
+                buffer,
+                Rect::new(
+                    layout.bar.x,
+                    layout.bar.y + offset as u16,
+                    layout.bar.width,
+                    1,
+                ),
+                0,
+                text,
+                dim(),
+            );
+        }
+    }
+    if let Some(error) = layout.error {
+        put(
+            buffer,
+            error,
+            0,
+            &format!(" {} ", form.error.as_deref().unwrap_or_default()),
+            RStyle::default().fg(RColor::White).bg(RColor::Red),
+        );
+    }
+    if layout.hints.height > 0 {
+        put(
+            buffer,
+            layout.hints,
+            0,
+            " Tab/↑↓ field · Enter connects · Ctrl+L or Delete clears the key · Ctrl+A older · Esc cancels ",
+            dim(),
+        );
+    }
+    cursor.or(Some((area.x + 1, area.y)))
 }
 
 /// The MCP/AI pairing form: address, port and one AI sharing key, saved to the
@@ -1257,7 +1859,20 @@ fn draw_status(state: &AppState, buffer: &mut Buffer, area: Rect) -> bool {
             Severity::Error => RStyle::default().fg(RColor::White).bg(RColor::Red),
             Severity::Info => RStyle::default().fg(RColor::Yellow),
         };
-        put(buffer, area, 0, &format!(" {} ", notice.text), style);
+        let text = match state.warning_position() {
+            Some((position, total)) if total > 1 => {
+                format!(
+                    " warning {position}/{total}: {} — press x in the sidebar to dismiss ",
+                    notice.text
+                )
+            }
+            Some(_) => format!(
+                " warning: {} — press x in the sidebar to dismiss ",
+                notice.text
+            ),
+            None => format!(" {} ", notice.text),
+        };
+        put(buffer, area, 0, &text, style);
         return true;
     }
     if state.view == View::Scrollback {
@@ -1302,9 +1917,8 @@ fn draw_hints(state: &AppState, buffer: &mut Buffer, area: Rect) {
         (Focus::Right, View::Settings) => {
             " Ctrl+S save · Esc cancel · Tab/↑↓ move · Space/Enter toggle or edit ".to_string()
         }
-        (Focus::Right, View::Pairing) => {
-            " ↑/↓ scroll · c/C copy · v/V select-copy · a older details · s stop · Esc back "
-                .to_string()
+        (Focus::Right, View::Share) => {
+            " ↑/↓ select · Enter edit or activate · Space toggle · Esc back ".to_string()
         }
         (Focus::Right, View::Connect) => {
             " Tab/↑↓ field · Ctrl+A older-host fields · Enter connects · Esc cancels ".to_string()
@@ -2267,5 +2881,245 @@ mod tests {
         render(&state, &mut buffer, Rect::new(0, 0, 120, 16));
         let header = &screen(&state, 120, 16)[0];
         assert_eq!(header.matches('界').count(), 6, "{header:?}");
+    }
+
+    fn active_share(state: &mut AppState) {
+        use serial_nexus_protocol::{PairingRole, PairingSecret, ShareSessionInfo};
+        let bind: std::net::SocketAddr = "127.0.0.1:7331".parse().unwrap();
+        state.sharing.active = true;
+        state.sharing.pairing = Some(ShareSessionInfo {
+            session_id: "test".into(),
+            bind,
+            host: serial_nexus_protocol::PairedHost {
+                address: bind,
+                host_name: "127.0.0.1".into(),
+                ca_cert_der_b64: "Y2E=".into(),
+                host_cert_fingerprint_sha256: "00".repeat(32),
+            },
+            human: PairingSecret {
+                role: PairingRole::Human,
+                credential: "human-test".into(),
+            },
+            ai: PairingSecret {
+                role: PairingRole::Ai,
+                credential: "ai-test".into(),
+            },
+        });
+    }
+
+    #[test]
+    fn the_share_scroll_limit_matches_the_keys_the_page_draws() {
+        let mut state = demo();
+        active_share(&mut state);
+        state.resize(27, 103);
+        let right = Rect::new(0, 0, 103, 27);
+        let layout = share_layout(&state, right).expect("layout");
+        let lines = pairing_lines(&state)
+            .iter()
+            .flat_map(|line| wrap_line(line, layout.details.width.max(1) as usize))
+            .count();
+        assert_eq!(
+            share_max_scroll(&state),
+            lines.saturating_sub(layout.details.height as usize),
+            "the scroll clamp uses the same pane the renderer does"
+        );
+    }
+
+    #[test]
+    fn the_share_wheel_targets_the_form_or_the_key_details() {
+        let mut state = demo();
+        active_share(&mut state);
+        state.begin_share();
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = share_layout(&state, panes(area).right).expect("layout");
+        assert_eq!(
+            share_wheel_target(&state, area, layout.form.x + 1, layout.form.y),
+            Some(ShareWheel::Form)
+        );
+        assert_eq!(
+            share_wheel_target(
+                &state,
+                area,
+                layout.details.x + 1,
+                layout.details.y + layout.details.height.saturating_sub(1)
+            ),
+            Some(ShareWheel::Details)
+        );
+    }
+
+    #[test]
+    fn a_small_or_crowded_share_page_still_reserves_room_for_its_keys() {
+        let mut state = demo();
+        active_share(&mut state);
+        let small = Rect::new(0, 0, 40, 12);
+        let layout = share_layout(&state, panes(small).right).expect("layout");
+        assert!(
+            layout.details.height >= 3,
+            "a 40x12 page keeps keys/details reachable: {layout:?}"
+        );
+
+        let mut crowded = demo();
+        active_share(&mut crowded);
+        crowded.set_devices(
+            (0..13)
+                .map(|index| DeviceEntry::new(format!("/dev/ttyUSB{index}")))
+                .collect(),
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = share_layout(&crowded, panes(area).right).expect("layout");
+        assert!(
+            layout.details.height >= 3,
+            "thirteen devices cannot consume the whole key area: {layout:?}"
+        );
+    }
+
+    #[test]
+    fn the_share_page_shows_fields_devices_and_an_explicit_start_button() {
+        let mut state = demo();
+        state.begin_share();
+        let text = screen(&state, 100, 30).join("\n");
+        assert!(text.contains("Share · off"), "{text}");
+        assert!(text.contains("Host address"), "{text}");
+        assert!(text.contains("Port"), "{text}");
+        assert!(text.contains("[ ] /dev/ttyUSB1"), "{text}");
+        assert!(text.contains("[ Start sharing ]"), "{text}");
+        assert!(
+            !text.contains("Human terminal key"),
+            "nothing is shared before Start: {text}"
+        );
+        assert!(text.contains("Enter edit or activate"), "{text}");
+    }
+
+    #[test]
+    fn a_serious_warning_adds_a_visible_dismiss_row_and_a_key_hint() {
+        let mut state = demo();
+        state.warning("write may have reached /dev/ttyUSB1");
+        let text = screen(&state, 100, 30).join("\n");
+        assert!(text.contains("warning: write may have reached"), "{text}");
+        assert!(text.contains("[ Dismiss warning ]"), "{text}");
+        assert!(text.contains("x dismiss"), "{text}");
+        let area = Rect::new(0, 0, 100, 30);
+        let sidebar = panes(area).sidebar;
+        let dismiss = sidebar_with_warning(sidebar, true)
+            .expect("sidebar")
+            .dismiss;
+        assert_eq!(
+            hit_test(&state, area, dismiss.x + 1, dismiss.y),
+            Some(Hit::Dismiss)
+        );
+    }
+
+    #[test]
+    fn a_narrow_connect_page_keeps_the_older_fields_clickable() {
+        let mut state = demo();
+        state.connect = Some(ConnectForm::new());
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+        let area = Rect::new(0, 0, 40, 12);
+        let text = screen(&state, 40, 12).join("\n");
+        assert!(text.contains("[ Older fields ]"), "{text}");
+        let row = text
+            .lines()
+            .position(|line| line.contains("[ Older fields ]"))
+            .expect("the button row") as u16;
+        let column = text
+            .lines()
+            .nth(row as usize)
+            .and_then(|line| line.find("[ Older fields ]"))
+            .expect("the button column") as u16;
+        assert_eq!(
+            connect_hit_test(&state, panes(area).right, column, row),
+            Some(ConnectHit::ToggleMode)
+        );
+    }
+
+    #[test]
+    fn the_narrowest_connect_page_still_draws_every_action_target() {
+        let mut state = demo();
+        state.connect = Some(ConnectForm::new());
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+        let area = Rect::new(0, 0, 27, 12);
+        let right = panes(area).right;
+        let text = screen(&state, 27, 12).join("\n");
+        for label in [
+            "[ Connect ]",
+            "[ Clear key ]",
+            "[ Cancel ]",
+            "[ Older fields ]",
+        ] {
+            assert!(text.contains(label), "{label} is drawn:\n{text}");
+        }
+        let mut found = Vec::new();
+        for row in right.y..right.bottom() {
+            for column in right.x..right.right() {
+                if let Some(hit) = connect_hit_test(&state, right, column, row) {
+                    if !found.contains(&hit) {
+                        found.push(hit);
+                    }
+                }
+            }
+        }
+        assert!(found.contains(&ConnectHit::Connect), "{found:?}");
+        assert!(found.contains(&ConnectHit::ClearKey), "{found:?}");
+        assert!(found.contains(&ConnectHit::Cancel), "{found:?}");
+        assert!(found.contains(&ConnectHit::ToggleMode), "{found:?}");
+    }
+
+    #[test]
+    fn a_short_connect_page_scrolls_to_the_selected_advanced_field() {
+        let mut state = demo();
+        state.connect = Some(ConnectForm::advanced());
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+        if let Some(form) = &mut state.connect {
+            form.field = ConnectField::Credential;
+            form.credential = "pinned-secret".into();
+        }
+        let text = screen(&state, 80, 10).join("\n");
+        assert!(
+            text.contains("Human pairing credential"),
+            "the selected field is drawn, not hidden above the viewport:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_share_page_still_shows_an_action_failure() {
+        let mut state = demo();
+        state.begin_share();
+        state.share_error = Some("check at least one device before starting".into());
+        let text = screen(&state, 80, 8).join("\n");
+        assert!(
+            text.contains("check at least one device"),
+            "a compact page shows the action failure:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_very_short_sidebar_still_exposes_a_mouse_dismiss_target() {
+        let mut state = demo();
+        state.warning("write uncertain");
+        let area = Rect::new(0, 0, 40, 7);
+        let sidebar = panes(area).sidebar;
+        let dismiss = sidebar_with_warning(sidebar, true)
+            .expect("sidebar")
+            .dismiss;
+        assert!(dismiss.height > 0, "the Dismiss row is drawn: {sidebar:?}");
+        assert_eq!(
+            hit_test(&state, area, dismiss.x + 1, dismiss.y),
+            Some(Hit::Dismiss)
+        );
+    }
+
+    #[test]
+    fn the_connect_page_shows_visible_connect_and_clear_key_buttons() {
+        let mut state = demo();
+        state.connect = Some(ConnectForm::new());
+        state.view = View::Connect;
+        let text = screen(&state, 100, 30).join("\n");
+        assert!(text.contains("[ Connect ]"), "{text}");
+        assert!(text.contains("[ Clear key ]"), "{text}");
+        assert!(text.contains("[ Cancel ]"), "{text}");
+        assert!(text.contains("Ctrl+L"), "{text}");
     }
 }

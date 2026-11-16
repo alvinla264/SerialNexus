@@ -17,7 +17,10 @@ use serial_nexus_protocol::{
 };
 
 use crate::input::{echo_key, map_key, Action, Key};
-use crate::render::{hit_test, pairing_max_scroll, panes, settings_hit_test, Hit, SettingsHit};
+use crate::render::{
+    connect_hit_test, hit_test, panes, settings_hit_test, share_hit_test, share_max_scroll,
+    ConnectHit, Hit, SettingsHit,
+};
 use crate::settings::{SettingsStore, TerminalSettings};
 use crate::state::{
     short_holder, AppState, ClipboardCopy, ConnectForm, DeviceEntry, EndpointId, Focus, FormMode,
@@ -252,7 +255,7 @@ impl App {
         }
         failures.extend(self.refresh_remotes());
         if !failures.is_empty() {
-            self.state.notice = Some(Notice::error(failures.join("; ")));
+            self.state.set_notice(Notice::error(failures.join("; ")));
         }
         if self.state.sharing.active {
             self.sync_share_status();
@@ -296,7 +299,7 @@ impl App {
         // An open Connect form belongs to a host that is not connected yet, so
         // an unrelated host going away must not close it (and redirect the
         // credentials being typed into the shown device's stream).
-        self.state.notice = Some(Notice::error(reason.to_string()));
+        self.state.set_notice(Notice::error(reason.to_string()));
     }
 
     fn expected_closes_mut(&mut self, endpoint: EndpointId) -> Option<&mut HashSet<u64>> {
@@ -412,7 +415,7 @@ impl App {
                 Err(error) => failed.push(format!("{path}: {error}")),
             }
         }
-        self.state.notice = Some(if !closed.is_empty() {
+        self.state.set_notice(if !closed.is_empty() {
             Notice::error(format!(
                 "remote session closed while its event queue was full: {}",
                 closed.join(", ")
@@ -459,7 +462,7 @@ impl App {
             // EOF and revokes the listener and credentials.
             self.client.shutdown_transport();
             self.state.sharing.clear_session();
-            self.state.close_pairing_view();
+            self.state.close_share_view();
         }
         self.state.apply_endpoint_event(endpoint, &event);
     }
@@ -504,8 +507,23 @@ impl App {
             Action::SettingsEditDone => self.state.end_settings_edit(),
             Action::SettingsSave => self.save_settings(),
             Action::SettingsCancel => self.state.cancel_settings(),
-            Action::ShareToggle => self.toggle_sharing(),
-            Action::OpenPairing => self.open_pairing(),
+            Action::OpenShare => self.open_share(),
+            Action::ShareMove(delta) => self.share_move(delta),
+            Action::ShareBeginEdit => {
+                self.state.begin_share_edit();
+            }
+            Action::ShareEditChar(ch) => self.state.share_edit_push(ch),
+            Action::ShareEditBackspace => self.state.share_edit_backspace(),
+            Action::ShareEditDone => self.state.end_share_edit(),
+            Action::ShareToggleDraft => {
+                self.state.toggle_share_draft();
+            }
+            Action::ShareActivate => self.share_activate(),
+            Action::ShareSave => self.share_save(),
+            Action::ShareCancel => self.share_cancel(),
+            Action::ShareScroll(delta) => self.scroll_share(delta),
+            Action::DismissNotice => self.dismiss_warning(),
+            Action::ConnectClearKey => self.connect_clear_key(),
             Action::ConnectRemote => self.start_connect(),
             Action::ConnectToggleMode => self.connect_toggle_mode(),
             Action::ConnectChar(ch) => self.connect_push(ch),
@@ -519,13 +537,12 @@ impl App {
             Action::McpNext(delta) => self.mcp_next_field(delta),
             Action::McpSubmit => self.submit_mcp_pair(),
             Action::McpCancel => self.leave_mcp_pair(),
-            Action::LeavePairing => self.leave_pairing(),
             Action::PairingToggleAdvanced => self.toggle_pairing_advanced(),
             Action::CopyHumanKey => self.copy_pairing_key(PairingRole::Human),
             Action::CopyAiKey => self.copy_pairing_key(PairingRole::Ai),
             Action::ShowHumanKey => self.show_pairing_key(PairingRole::Human),
             Action::ShowAiKey => self.show_pairing_key(PairingRole::Ai),
-            Action::PairingScroll(delta) => self.scroll_pairing(delta),
+            Action::PairingScroll(delta) => self.scroll_share(delta),
             Action::Ignore => {}
         }
     }
@@ -551,7 +568,7 @@ impl App {
             return;
         }
         let Some(session) = self.state.highlighted_session() else {
-            self.state.notice = Some(Notice::error(
+            self.state.set_notice(Notice::error(
                 "highlight an attached device first: press Enter to open it",
             ));
             return;
@@ -561,7 +578,8 @@ impl App {
             device_id: session.device_id,
         };
         if !self.state.settings.scrollback {
-            self.state.notice = Some(Notice::error("scrollback is off in the settings"));
+            self.state
+                .set_notice(Notice::error("scrollback is off in the settings"));
             return;
         }
         self.state.show_device(key);
@@ -570,7 +588,7 @@ impl App {
         }
         self.state.view = View::Scrollback;
         self.state.focus = Focus::Right;
-        self.state.notice = None;
+        self.state.clear_ordinary_notice();
     }
 
     /// Leave the scrollback view for the live stream. The stream starts at the
@@ -621,11 +639,38 @@ impl App {
     /// forward. The live stream has its own keys, so the wheel does nothing
     /// there.
     pub fn handle_scroll(&mut self, up: bool) {
-        if self.state.view != View::Scrollback {
+        const NOTCH: i32 = 3;
+        match self.state.view {
+            View::Scrollback => self.scroll_stream(if up { NOTCH } else { -NOTCH }),
+            // The Share page's keys and older host fields can be longer than
+            // the pane; the wheel scrolls them without moving the selection.
+            View::Share => self.scroll_share(if up { -NOTCH } else { NOTCH }),
+            _ => {}
+        }
+    }
+
+    /// A wheel notch follows the pointer on the Share page: over the form it
+    /// moves the selection so off-screen controls are mouse-reachable, over
+    /// the details it scrolls the keys.
+    fn handle_mouse_scroll(&mut self, area: Rect, column: u16, row: u16, up: bool) {
+        if self.state.view == View::Connect {
+            if matches!(
+                connect_hit_test(&self.state, panes(area).right, column, row),
+                Some(ConnectHit::Field(_))
+            ) {
+                self.connect_next_field(if up { -1 } else { 1 });
+            }
             return;
         }
-        const NOTCH: i32 = 3;
-        self.scroll_stream(if up { NOTCH } else { -NOTCH });
+        if self.state.view != View::Share {
+            self.handle_scroll(up);
+            return;
+        }
+        match crate::render::share_wheel_target(&self.state, area, column, row) {
+            Some(crate::render::ShareWheel::Form) => self.share_move(if up { -1 } else { 1 }),
+            Some(crate::render::ShareWheel::Details) => self.scroll_share(if up { -3 } else { 3 }),
+            None => {}
+        }
     }
 
     /// Move the sidebar highlight over the devices and the Settings button. A
@@ -662,14 +707,17 @@ impl App {
                 return;
             }
             Some(Hit::Share) => {
-                self.state.select_index(self.state.devices.len());
-                self.toggle_sharing();
+                self.state.select_sidebar_button(SidebarButton::Share);
+                self.open_share();
                 return;
             }
             Some(Hit::Connect) => {
-                self.state
-                    .select_index(self.state.devices.len().saturating_add(1));
+                self.state.select_sidebar_button(SidebarButton::Connect);
                 self.start_connect();
+                return;
+            }
+            Some(Hit::Dismiss) => {
+                self.dismiss_warning();
                 return;
             }
             Some(Hit::Settings) => {
@@ -708,13 +756,37 @@ impl App {
                     Some(SettingsHit::Cancel) => self.state.cancel_settings(),
                     Some(SettingsHit::Flag(_)) | None => {}
                 }
+            } else if self.state.view == View::Share {
+                if let Some(index) = share_hit_test(&self.state, right, column, row) {
+                    if index < self.state.share_rows().len() {
+                        self.state.share_row = index;
+                        self.state.end_share_edit();
+                        self.share_activate();
+                    }
+                }
+            } else if self.state.view == View::Connect {
+                match connect_hit_test(&self.state, right, column, row) {
+                    Some(ConnectHit::Field(field)) => {
+                        if let Some(form) = &mut self.state.connect {
+                            // Moving the pointer between fields is not an
+                            // edit; keep the validation reason until input
+                            // changes or another submit replaces it.
+                            form.field = field;
+                        }
+                    }
+                    Some(ConnectHit::Connect) => self.submit_connect(),
+                    Some(ConnectHit::ClearKey) => self.connect_clear_key(),
+                    Some(ConnectHit::Cancel) => self.leave_connect(),
+                    Some(ConnectHit::ToggleMode) => self.connect_toggle_mode(),
+                    None => {}
+                }
             }
         }
     }
 
     /// Handle a mouse event, recognising a double-click on a device row as
     /// "open or join this device". Two clicks on the same cell within
-    /// [`DOUBLE_CLICK`] count; a single click only highlights.
+    /// `DOUBLE_CLICK` count; a single click only highlights.
     pub fn handle_mouse(
         &mut self,
         area: Rect,
@@ -756,8 +828,8 @@ impl App {
                     self.handle_click(area, column, row);
                 }
             }
-            MouseEventKind::ScrollUp => self.handle_scroll(true),
-            MouseEventKind::ScrollDown => self.handle_scroll(false),
+            MouseEventKind::ScrollUp => self.handle_mouse_scroll(area, column, row, true),
+            MouseEventKind::ScrollDown => self.handle_mouse_scroll(area, column, row, false),
             _ => {}
         }
     }
@@ -773,6 +845,7 @@ impl App {
             Some(Hit::Share) => Some(ClickTarget::Share),
             Some(Hit::Connect) => Some(ClickTarget::Connect),
             Some(Hit::Settings) => Some(ClickTarget::Settings),
+            Some(Hit::Dismiss) => None,
             None => None,
         }
     }
@@ -801,7 +874,7 @@ impl App {
                 }
             }
             Some(ClickTarget::Settings) => self.open_settings(),
-            Some(ClickTarget::Share) => self.toggle_sharing(),
+            Some(ClickTarget::Share) => self.open_share(),
             Some(ClickTarget::Connect) => self.start_connect(),
             // The first click already did all there is to do (focus a pane).
             None => {}
@@ -825,7 +898,7 @@ impl App {
     /// changes, reporting why and keeping the draft. Returns whether it did.
     fn refuse_if_unsaved_settings(&mut self) -> bool {
         if self.state.has_unsaved_settings() {
-            self.state.notice = Some(Notice::error(
+            self.state.set_notice(Notice::error(
                 "settings have unsaved changes: Save or Cancel first",
             ));
             return true;
@@ -837,8 +910,9 @@ impl App {
     /// does what it says.
     fn activate_selected(&mut self) {
         match self.state.selected_button() {
-            Some(SidebarButton::Share) => self.toggle_sharing(),
+            Some(SidebarButton::Share) => self.open_share(),
             Some(SidebarButton::Connect) => self.start_connect(),
+            Some(SidebarButton::Dismiss) => self.dismiss_warning(),
             Some(SidebarButton::Settings) => self.open_settings(),
             None => self.open_selected(),
         }
@@ -862,28 +936,34 @@ impl App {
 
     fn save_settings(&mut self) {
         self.state.end_settings_edit();
-        let address_text = self.state.draft.share_address.trim().to_string();
-        let (address, scope) = match RemoteEndpoint::parse_address(&address_text) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                self.state.notice = Some(Notice::error(format!("settings not saved: {message}")));
-                return;
+        match self.persist_draft() {
+            Ok(()) => {
+                self.state.commit_settings();
+                self.state.info("settings saved");
             }
-        };
-        let port: u16 = match self.state.port_text.trim().parse() {
-            Ok(port) => port,
-            Err(_) => {
-                self.state.notice = Some(Notice::error(
-                    "settings not saved: the share port is not a number from 0 to 65535",
-                ));
-                return;
+            Err(message) if message.contains("unknown") => {
+                self.state.warning(format!("settings not saved: {message}"))
             }
-        };
-        let bind = ShareBind::with_scope(address, port, scope);
-        if let Err(message) = bind.validate() {
-            self.state.notice = Some(Notice::error(format!("settings not saved: {message}")));
-            return;
+            Err(message) => self.state.error(format!("settings not saved: {message}")),
         }
+    }
+
+    /// Validate, stage, publish and commit the settings draft and its device
+    /// checklist. Nothing becomes effective unless the whole sequence
+    /// succeeds; a failure restores both checklists and leaves the draft
+    /// exactly as the human typed it. The caller decides whether to keep the
+    /// page open and how to show the reason.
+    fn persist_draft(&mut self) -> Result<(), String> {
+        let address_text = self.state.draft.share_address.trim().to_string();
+        let (address, scope) = RemoteEndpoint::parse_address(&address_text)?;
+        let port: u16 = self
+            .state
+            .port_text
+            .trim()
+            .parse()
+            .map_err(|_| "the share port is not a number from 0 to 65535".to_string())?;
+        let bind = ShareBind::with_scope(address, port, scope);
+        bind.validate()?;
         self.state.draft.share_address = address_text;
         self.state.draft.share_port = port;
 
@@ -907,10 +987,10 @@ impl App {
                     )
             });
             if unverified_checked {
-                self.state.notice = Some(Notice::error(
-                    "settings not saved: cannot verify an active shared device identity; refresh discovery and try again, or uncheck that device",
-                ));
-                return;
+                return Err(
+                    "cannot verify an active shared device identity; refresh discovery and try again, or uncheck that device"
+                        .to_string(),
+                );
             }
         }
 
@@ -926,8 +1006,7 @@ impl App {
         let draft_checked = self.state.draft_checked.clone();
         let Some(store) = self.settings_store.clone() else {
             self.restore_settings_checklists(original_draft_checked, original_pending_checked);
-            self.state.notice = Some(Notice::error("settings not saved: no settings file"));
-            return;
+            return Err("no settings file".to_string());
         };
         let active = self.state.sharing.active;
         let desired: Vec<String> = draft_checked.iter().cloned().collect();
@@ -944,8 +1023,7 @@ impl App {
                     original_draft_checked.clone(),
                     original_pending_checked.clone(),
                 );
-                self.state.notice = Some(Notice::error(format!("settings not saved: {error}")));
-                return;
+                return Err(error.to_string());
             }
         });
 
@@ -964,8 +1042,7 @@ impl App {
                         original_draft_checked.clone(),
                         original_pending_checked.clone(),
                     );
-                    self.state.notice = Some(Notice::error(format!("settings not saved: {error}")));
-                    return;
+                    return Err(error.to_string());
                 }
             }
         }
@@ -981,8 +1058,7 @@ impl App {
                     original_draft_checked.clone(),
                     original_pending_checked.clone(),
                 );
-                self.state.notice = Some(Notice::error(format!("settings not saved: {error}")));
-                return;
+                return Err(error.to_string());
             }
         };
 
@@ -1012,17 +1088,15 @@ impl App {
                         if !uncertain {
                             self.state.sharing.pending_checked = original_pending_checked.clone();
                         }
-                        let message = match rollback {
+                        return Err(match rollback {
                             Ok(()) if uncertain => format!(
                                 "settings save is unknown: {error}; the core may have applied the checklist — check it and save again"
                             ),
-                            Ok(()) => format!("settings not saved: {error}"),
+                            Ok(()) => error.to_string(),
                             Err(rollback_error) => format!(
                                 "settings save is unknown: {error}; previous preferences could not be restored: {rollback_error}"
                             ),
-                        };
-                        self.state.notice = Some(Notice::error(message));
-                        return;
+                        });
                     }
                 }
             }
@@ -1037,8 +1111,7 @@ impl App {
             // user's attempted draft with the core's committed checklist.
             self.state.draft_checked = self.state.sharing.pending_checked.clone();
         }
-        self.state.commit_settings();
-        self.state.notice = Some(Notice::info("settings saved"));
+        Ok(())
     }
 
     pub fn toggle_sharing(&mut self) {
@@ -1049,45 +1122,46 @@ impl App {
         }
     }
 
-    /// Turn sharing on deliberately. At least one device must be checked and
-    /// the saved bind address must be one concrete IPv4 or IPv6 address; a
-    /// bind failure is shown and leaves sharing off.
+    /// Turn sharing on deliberately, as the Share page's Start button does.
+    /// At least one device must be checked and the saved bind address must be
+    /// one concrete IPv4 or IPv6 address; a bind failure is shown and leaves
+    /// sharing off.
     pub fn start_sharing(&mut self) {
+        self.state.clear_ordinary_notice();
+        match self.try_start_sharing() {
+            Ok(()) => self
+                .state
+                .info("sharing on — the Share page shows the keys"),
+            Err(message) => self.state.error(format!("sharing not started: {message}")),
+        }
+    }
+
+    fn try_start_sharing(&mut self) -> Result<(), String> {
         if self.state.sharing.active {
-            self.state.notice = Some(Notice::info("sharing is already on"));
-            return;
+            return Err("sharing is already on".to_string());
         }
         if self.refuse_if_unsaved_settings() {
-            return;
+            return Err("settings have unsaved changes: Save or Cancel first".to_string());
         }
         self.state.drop_replaced_checks();
         let devices: Vec<String> = self.state.sharing.pending_checked.iter().cloned().collect();
         if devices.is_empty() {
-            self.state.notice = Some(Notice::error(
-                "check at least one device in Settings before starting to share",
-            ));
-            return;
+            return Err("check at least one device on the Share page before starting".to_string());
         }
-        let bind = match self.share_bind() {
-            Ok(bind) => bind,
-            Err(message) => {
-                self.state.notice = Some(Notice::error(format!("sharing not started: {message}")));
-                return;
-            }
-        };
+        let bind = self.share_bind()?;
         let expected = self.state.sharing.pending_checked.identities();
         match self.client.start_sharing_expected(bind, devices, expected) {
             Ok(info) => {
                 self.state.sharing.active = true;
                 self.state.sharing.pairing = Some(info);
                 self.sync_share_status();
-                self.state.view = View::Pairing;
+                self.state.view = View::Share;
                 self.state.focus = Focus::Right;
                 self.state.prompt = None;
                 self.state.pairing_scroll = 0;
-                self.state.notice = Some(Notice::info(
-                    "sharing on — the pairing view shows the credentials",
-                ));
+                self.state.share_confirm = None;
+                self.state.share_error = None;
+                Ok(())
             }
             Err(error) => {
                 if matches!(
@@ -1106,19 +1180,21 @@ impl App {
                         // be shown to its owner.
                         self.stop_sharing();
                     }
-                    self.state.notice = Some(Notice::error(if self.state.sharing.active {
+                    let message = if self.state.sharing.active {
                         format!(
-                            "sharing start is unknown: {error}; pairing information was lost — press s to stop the session"
+                            "sharing start is unknown: {error}; pairing information was lost — stop the session from the Share page"
                         )
                     } else {
                         format!(
                             "sharing start response was lost: {error}; the session was stopped because pairing information is unavailable — start sharing again"
                         )
-                    }));
+                    };
+                    // An uncertain network outcome must stay until dismissed.
+                    self.state.warning(message.clone());
+                    Err(message)
                 } else {
                     self.state.sharing.clear_session();
-                    self.state.notice =
-                        Some(Notice::error(format!("sharing not started: {error}")));
+                    Err(error.to_string())
                 }
             }
         }
@@ -1199,7 +1275,7 @@ impl App {
                     serial_nexus_client::PeerSave::Added => "saved",
                     serial_nexus_client::PeerSave::Replaced => "replaced",
                 };
-                self.state.notice = Some(Notice::info(format!(
+                self.state.set_notice(Notice::info(format!(
                     "MCP pairing {action} for {endpoint} in {}",
                     path.display()
                 )));
@@ -1282,6 +1358,9 @@ impl App {
                     form.push_str(text);
                 }
             }
+            (Focus::Right, View::Share) if self.state.share_editing => {
+                self.state.share_edit_push_str(text);
+            }
             (Focus::Right, View::Settings) if self.state.settings_editing => {
                 for ch in text.chars().filter(|ch| ch.is_ascii_graphic()) {
                     self.handle_key(Key::Char(ch));
@@ -1297,12 +1376,13 @@ impl App {
     }
 
     /// Put one complete sharing key, unwrapped, on the terminal's clipboard.
-    /// The pairing view's rows are hard-wrapped, so selecting them would add
+    /// The Share page's key rows are hard-wrapped, so selecting them would add
     /// line breaks; this is the private, user-directed way to move the exact
     /// string. The event loop writes the OSC 52 sequence and clears this.
     pub fn copy_pairing_key(&mut self, role: PairingRole) {
         let Some(pairing) = &self.state.sharing.pairing else {
-            self.state.notice = Some(Notice::error("sharing is off: start it to copy a key"));
+            self.state
+                .set_notice(Notice::error("sharing is off: start it to copy a key"));
             return;
         };
         let secret = match role {
@@ -1316,12 +1396,12 @@ impl App {
         match SharingKey::encode(&pairing.host, secret) {
             Ok(key) => {
                 self.state.clipboard_copy = Some(ClipboardCopy { label, key });
-                self.state.notice = Some(Notice::info(format!(
-                    "asked the terminal to copy the {label}"
-                )));
+                self.state.info(format!(
+                    "copy requested for the {label} — the terminal may ignore it; use v or V to select the key"
+                ));
             }
             Err(error) => {
-                self.state.notice = Some(Notice::error(format!(
+                self.state.set_notice(Notice::error(format!(
                     "the {label} could not be built: {error}"
                 )));
             }
@@ -1351,8 +1431,8 @@ impl App {
             .unwrap_or((self.state.cols(), self.state.rows()));
         let key_rows = key.key.len().div_ceil(columns.max(1)) + 4;
         if key_rows > rows {
-            self.state.notice = Some(Notice::info(format!(
-                "this pane is too short to show the whole {}; enlarge the terminal and press v or V again",
+            self.state.set_notice(Notice::info(format!(
+                "this pane is too short to show the whole {}; enlarge the terminal and activate its Show key button again",
                 key.label
             )));
             return;
@@ -1362,7 +1442,8 @@ impl App {
 
     fn pairing_key(&mut self, role: PairingRole) -> Option<ClipboardCopy> {
         let Some(pairing) = &self.state.sharing.pairing else {
-            self.state.notice = Some(Notice::error("sharing is off: start it to show a key"));
+            self.state
+                .set_notice(Notice::error("sharing is off: start it to show a key"));
             return None;
         };
         let secret = match role {
@@ -1376,7 +1457,7 @@ impl App {
         match SharingKey::encode(&pairing.host, secret) {
             Ok(key) => Some(ClipboardCopy { label, key }),
             Err(error) => {
-                self.state.notice = Some(Notice::error(format!(
+                self.state.set_notice(Notice::error(format!(
                     "the {label} could not be built: {error}"
                 )));
                 None
@@ -1384,62 +1465,208 @@ impl App {
         }
     }
 
-    /// Show or hide the older host fields in the pairing view.
+    /// Show or hide the older host fields on the Share page.
     fn toggle_pairing_advanced(&mut self) {
         self.state.pairing_advanced = !self.state.pairing_advanced;
         self.state.pairing_scroll = 0;
     }
 
     /// Stop sharing, which revokes both credentials and disconnects every
-    /// remote client. The checked selection stays for this launch only.
+    /// remote client. The Share page stays open so the new state is visible;
+    /// the checked selection stays for this launch only.
     pub fn stop_sharing(&mut self) {
         if !self.state.sharing.active {
-            self.state.notice = Some(Notice::info("sharing is already off"));
+            self.state.info("sharing is already off");
             return;
         }
         match self.client.stop_sharing() {
             Ok(()) => {
                 self.state.sharing.clear_session();
-                if self.state.view == View::Pairing {
-                    // Stop may come from the sidebar; do not hand the keys to
-                    // the stream without an explicit focus change.
-                    self.state.close_pairing_view();
-                }
-                self.state.notice = Some(Notice::info("sharing stopped"));
+                self.state.share_confirm = None;
+                self.state.share_error = None;
+                self.state.info("sharing stopped");
             }
             Err(error) => {
-                self.state.notice = Some(Notice::error(format!("sharing not stopped: {error}")));
+                self.state.warning(format!("sharing not stopped: {error}"));
                 self.sync_share_status();
             }
         }
     }
 
-    /// Show the owner's pairing information. Only the terminal that started
-    /// the session may see it, and only while the session is running.
-    pub fn open_pairing(&mut self) {
-        if !self.state.sharing.active {
-            self.state.notice = Some(Notice::error(
-                "sharing is off: press s or use the Share button to start it",
-            ));
-            return;
-        }
+    /// Open the owner's Share page: the address, port, device checklist and
+    /// explicit Start/Stop controls. Opening it never starts, stops or
+    /// connects anything.
+    pub fn open_share(&mut self) {
         if self.refuse_if_unsaved_settings() {
             return;
         }
-        self.state.prompt = None;
-        self.state.view = View::Pairing;
-        self.state.focus = Focus::Right;
-        self.state.pairing_scroll = 0;
+        self.state.clear_ordinary_notice();
+        self.state.begin_share();
     }
 
-    fn leave_pairing(&mut self) {
+    fn leave_share(&mut self) {
+        self.state.end_share_edit();
+        self.state.share_confirm = None;
+        self.state.cancel_share_edits();
         self.show_live_stream();
     }
 
-    fn scroll_pairing(&mut self, delta: i32) {
+    fn scroll_share(&mut self, delta: i32) {
         let next = self.state.pairing_scroll as i32 + delta;
-        let max = pairing_max_scroll(&self.state);
+        let max = share_max_scroll(&self.state);
         self.state.pairing_scroll = next.clamp(0, max as i32) as usize;
+    }
+
+    /// Cancel the smallest thing that is pending: an edit, then a
+    /// confirmation, then unsaved edits. With nothing pending, Esc returns to
+    /// the stream.
+    fn share_cancel(&mut self) {
+        if self.state.share_editing {
+            self.state.end_share_edit();
+            return;
+        }
+        if self.state.share_confirm.is_some() {
+            self.state.share_confirm = None;
+            return;
+        }
+        if self.state.has_unsaved_share() {
+            self.state.cancel_share_edits();
+            return;
+        }
+        self.leave_share();
+    }
+
+    fn dismiss_warning(&mut self) {
+        self.state.dismiss_warning();
+        if self.state.selected_button() == Some(SidebarButton::Dismiss) {
+            self.state.select_settings_button();
+        }
+    }
+
+    fn share_move(&mut self, delta: i32) {
+        self.state.move_share_row(delta);
+    }
+
+    /// Activate the selected Share row. Editable rows start editing or toggle;
+    /// every network action is an explicit button that may need confirmation.
+    fn share_activate(&mut self) {
+        match self.state.selected_share_row() {
+            crate::state::ShareRow::Address | crate::state::ShareRow::Port => {
+                self.state.begin_share_edit();
+            }
+            crate::state::ShareRow::Device(_) => {
+                self.state.toggle_share_draft();
+            }
+            crate::state::ShareRow::StartStop => self.share_start_or_stop(),
+            crate::state::ShareRow::Save => self.share_save(),
+            crate::state::ShareRow::Cancel => self.state.cancel_share_edits(),
+            crate::state::ShareRow::CopyHuman => self.copy_pairing_key(PairingRole::Human),
+            crate::state::ShareRow::CopyAi => self.copy_pairing_key(PairingRole::Ai),
+            crate::state::ShareRow::ShowHuman => self.show_pairing_key(PairingRole::Human),
+            crate::state::ShareRow::ShowAi => self.show_pairing_key(PairingRole::Ai),
+            crate::state::ShareRow::Advanced => self.toggle_pairing_advanced(),
+        }
+    }
+
+    fn share_start_or_stop(&mut self) {
+        if self.state.sharing.active {
+            if self.state.share_confirm == Some(crate::state::ShareConfirm::Stop) {
+                self.state.share_confirm = None;
+                self.stop_sharing();
+            } else {
+                self.state.share_confirm = Some(crate::state::ShareConfirm::Stop);
+                self.state.share_error = None;
+            }
+            return;
+        }
+        if self.state.has_unsaved_share() {
+            if self.state.share_confirm == Some(crate::state::ShareConfirm::Start) {
+                self.share_save_and_start();
+            } else {
+                self.state.share_confirm = Some(crate::state::ShareConfirm::Start);
+                self.state.share_error = None;
+            }
+        } else {
+            self.state.share_confirm = None;
+            self.share_start_now();
+        }
+    }
+
+    fn share_start_now(&mut self) {
+        match self.try_start_sharing() {
+            Ok(()) => self.state.info("sharing on — copy a key below"),
+            Err(message) => self.state.share_error = Some(message),
+        }
+    }
+
+    fn share_save(&mut self) {
+        self.state.end_share_edit();
+        let was_active = self.state.sharing.active;
+        // Compare the parsed endpoints, not the raw address text: canonical
+        // IPv6 spellings and interface scopes must not look like a change.
+        let previous_bind = self.share_bind().ok();
+        let endpoint_changed = match (previous_bind, self.draft_share_bind().ok()) {
+            (Some(previous), Some(draft)) => previous != draft,
+            _ => true,
+        };
+        if was_active && endpoint_changed {
+            // A listener cannot move without closing and reissuing every
+            // credential. Refusing here keeps the running session, its
+            // credentials and its remote clients exactly as they were; the
+            // human stops sharing first when they really want a new endpoint.
+            self.share_save_failed(
+                "stop sharing before changing the address or port; the running share is unchanged"
+                    .to_string(),
+            );
+            return;
+        }
+
+        match self.persist_draft() {
+            Ok(()) => {
+                self.state.commit_share_draft();
+                self.state.info("share settings saved");
+            }
+            Err(message) => self.share_save_failed(message),
+        }
+    }
+
+    fn draft_share_bind(&self) -> Result<ShareBind, String> {
+        let (address, scope) =
+            RemoteEndpoint::parse_address(self.state.draft.share_address.trim())?;
+        let port: u16 = self
+            .state
+            .port_text
+            .trim()
+            .parse()
+            .map_err(|_| "the share port is not a number from 0 to 65535".to_string())?;
+        let bind = ShareBind::with_scope(address, port, scope);
+        bind.validate()?;
+        Ok(bind)
+    }
+
+    fn share_save_and_start(&mut self) {
+        self.state.end_share_edit();
+        match self.persist_draft() {
+            Ok(()) => {
+                self.state.commit_share_draft();
+                self.share_start_now();
+            }
+            Err(message) => {
+                self.state.share_confirm = None;
+                self.share_save_failed(message);
+            }
+        }
+    }
+
+    /// Show a failed Share save in its form. An outcome the core may already
+    /// have applied is serious: it also becomes a sticky warning so moving the
+    /// selection cannot hide it before the human acknowledges it.
+    fn share_save_failed(&mut self, message: String) {
+        if message.contains("unknown") {
+            self.state
+                .warning(format!("share settings not saved: {message}"));
+        }
+        self.state.share_error = Some(message);
     }
 
     /// Ask a remote host for its address, port and pairing information. The
@@ -1449,6 +1676,7 @@ impl App {
         if self.refuse_if_unsaved_settings() {
             return;
         }
+        self.state.clear_ordinary_notice();
         self.state.prompt = None;
         if let Some(form) = &mut self.state.connect {
             form.error = None;
@@ -1492,6 +1720,13 @@ impl App {
         }
     }
 
+    /// Clear the complete human sharing key while keeping the endpoint.
+    pub fn connect_clear_key(&mut self) {
+        if let Some(form) = &mut self.state.connect {
+            form.clear_key();
+        }
+    }
+
     pub fn connect_next_field(&mut self, delta: i32) {
         if let Some(form) = &mut self.state.connect {
             form.next_field(delta);
@@ -1525,7 +1760,7 @@ impl App {
                 if self.remotes.iter().any(|link| link.id == id) {
                     if refresh_failures.is_empty() {
                         if existing_notice.is_none() || self.state.notice == existing_notice {
-                            self.state.notice = Some(Notice::info(format!(
+                            self.state.set_notice(Notice::info(format!(
                                 "connected to {label}: its checked devices are in the sidebar"
                             )));
                         }
@@ -1536,7 +1771,7 @@ impl App {
                                 notices.insert(0, text);
                             }
                         }
-                        self.state.notice = Some(Notice::error(format!(
+                        self.state.set_notice(Notice::error(format!(
                             "connected to {label}; {}",
                             notices.join("; ")
                         )));
@@ -1579,7 +1814,7 @@ impl App {
                     return Err("the host fingerprint is not a SHA-256 hex value".to_string());
                 }
                 if form.ca.trim().is_empty() {
-                    return Err("enter the host's CA certificate from its pairing view".to_string());
+                    return Err("enter the host's CA certificate from its Share page".to_string());
                 }
                 if form.credential.trim().is_empty() {
                     return Err("enter the host's human pairing credential".to_string());
@@ -1693,7 +1928,7 @@ impl App {
             Ok(snapshot) => {
                 let lost = self.state.apply_sharing_snapshot(snapshot);
                 if !lost.is_empty() {
-                    self.state.notice = Some(Notice::error(format!(
+                    self.state.set_notice(Notice::error(format!(
                         "no longer shared: {} — check it again in Settings",
                         lost.join(", ")
                     )));
@@ -1714,12 +1949,13 @@ impl App {
                 );
                 if ended {
                     self.state.sharing.clear_session();
-                    self.state.close_pairing_view();
-                    self.state.notice = Some(Notice::error(format!("sharing stopped: {error}")));
+                    self.state.close_share_view();
+                    self.state
+                        .set_notice(Notice::error(format!("sharing stopped: {error}")));
                 } else {
-                    self.state.notice = Some(Notice::error(format!(
-                        "sharing status is unknown: {error}; sharing may still be on — press s to stop it"
-                    )));
+                    self.state.warning(format!(
+                        "sharing status is unknown: {error}; sharing may still be on — stop it from the Share page"
+                    ));
                 }
             }
         }
@@ -1736,7 +1972,8 @@ impl App {
             return;
         }
         let Some(device) = self.state.selected_device() else {
-            self.state.notice = Some(Notice::error("no device highlighted"));
+            self.state
+                .set_notice(Notice::error("no device highlighted"));
             return;
         };
         let path = device.path.clone();
@@ -1747,16 +1984,17 @@ impl App {
                 device_id: session.device_id,
             };
             self.focus_session(key);
-            self.state.notice = Some(Notice::info("already attached"));
+            self.state.set_notice(Notice::info("already attached"));
             return;
         }
         if device.open {
             match self.open_endpoint(endpoint, &path, None) {
                 Ok(_) => {}
-                Err(error) => self.state.notice = Some(Notice::error(error.to_string())),
+                Err(error) => self.state.set_notice(Notice::error(error.to_string())),
             }
         } else if !self.state.begin_baud_prompt() {
-            self.state.notice = Some(Notice::error("cannot open the highlighted device"));
+            self.state
+                .set_notice(Notice::error("cannot open the highlighted device"));
         }
     }
 
@@ -1794,7 +2032,7 @@ impl App {
             opened.control.holder.clone(),
         );
         self.focus_session(key);
-        self.state.notice = Some(Notice::info(format!(
+        self.state.set_notice(Notice::info(format!(
             "opened {} at {} baud",
             opened.port, opened.baud
         )));
@@ -1837,11 +2075,12 @@ impl App {
             return;
         }
         let Some(device) = self.state.selected_device() else {
-            self.state.notice = Some(Notice::error("no device highlighted"));
+            self.state
+                .set_notice(Notice::error("no device highlighted"));
             return;
         };
         if let Some(baud) = device.baud {
-            self.state.notice = Some(Notice::info(format!(
+            self.state.set_notice(Notice::info(format!(
                 "already open at {baud} baud; Enter joins at the active rate"
             )));
         }
@@ -1851,7 +2090,8 @@ impl App {
     /// connected, and the shown stream only changes if that device was shown.
     pub fn disconnect_selected(&mut self) {
         let Some(session) = self.state.highlighted_session() else {
-            self.state.notice = Some(Notice::error("highlight an attached device first"));
+            self.state
+                .set_notice(Notice::error("highlight an attached device first"));
             return;
         };
         let key = SessionKey {
@@ -1868,14 +2108,15 @@ impl App {
         match closed {
             Ok(()) => {
                 self.state.remove_session(key);
-                self.state.notice = Some(Notice::info(format!("disconnected {path}")));
+                self.state
+                    .set_notice(Notice::info(format!("disconnected {path}")));
             }
             Err(error) => {
                 if error.is_device_gone() {
                     self.state.remove_session(key);
                 }
-                self.state.notice =
-                    Some(Notice::error(format!("disconnect {path} failed: {error}")));
+                self.state
+                    .error(format!("disconnect {path} failed: {error}"));
             }
         }
         self.refresh_devices();
@@ -1890,7 +2131,7 @@ impl App {
     /// to the stream that has the focus and is on screen.
     pub fn write_shown(&mut self, bytes: &[u8], key: Key) {
         let Some(session) = self.state.shown_session() else {
-            self.state.notice = Some(Notice::error(
+            self.state.set_notice(Notice::error(
                 "no device shown — highlight one and press Enter to open it",
             ));
             return;
@@ -1913,7 +2154,12 @@ impl App {
             } else {
                 ""
             };
-            self.state.notice = Some(Notice::error(format!("write to {path}{retried}: {error}")));
+            let text = format!("write to {path}{retried}: {error}");
+            if error.is_write_uncertain() {
+                self.state.warning(text);
+            } else {
+                self.state.error(text);
+            }
             return;
         }
         let local_echo = self.state.settings.local_echo;

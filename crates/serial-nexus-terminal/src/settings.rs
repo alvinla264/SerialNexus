@@ -116,7 +116,7 @@ impl SettingsStore {
     }
 
     /// Write `settings` to a staging file and return it. The live file is
-    /// untouched until [`publish`] succeeds, so a Save that fails later leaves
+    /// untouched until [`Self::publish`] succeeds, so a Save that fails later leaves
     /// the previous preferences in place.
     pub fn stage(&self, settings: &TerminalSettings) -> Result<PathBuf, SettingsError> {
         self.create_directory()?;

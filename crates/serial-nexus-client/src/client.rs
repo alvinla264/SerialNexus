@@ -465,7 +465,7 @@ impl Client {
     }
 
     /// Validate a full checklist without applying it. Pair with
-    /// [`commit_shared_devices`] after the preferences are safely published.
+    /// [`Self::commit_shared_devices`] after the preferences are safely published.
     pub fn prepare_shared_devices_expected(
         &self,
         devices: Vec<String>,
@@ -481,7 +481,7 @@ impl Client {
     }
 
     /// Apply the checklist previously validated by
-    /// [`prepare_shared_devices_expected`].
+    /// [`Self::prepare_shared_devices_expected`].
     pub fn commit_shared_devices(&self, token: String) -> Result<SharingSnapshot, ClientError> {
         match self.request(
             Request::ShareCommit(ShareCommitParams { token }),

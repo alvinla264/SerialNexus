@@ -253,7 +253,7 @@ fn real_board_terminal_written_pairing_gate() {
     let peers_path = env("SER18_BOARD_PEERS")
         .expect("set SER18_BOARD_PEERS to the terminal-written mcp-peers.json path");
     let endpoint: SocketAddr = env("SER18_BOARD_BIND")
-        .expect("set SER18_BOARD_BIND to the host's <ip>:<port> shown in the pairing view")
+        .expect("set SER18_BOARD_BIND to the host's <ip>:<port> shown on the Share page")
         .parse()
         .expect("SER18_BOARD_BIND must be <ip>:<port>");
     let path = env("SER18_BOARD_REMOTE_PATH")

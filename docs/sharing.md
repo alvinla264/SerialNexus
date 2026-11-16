@@ -70,7 +70,7 @@ credentials, so stopping or restarting sharing produces different keys and old
 ones fail the TLS trust/pin check (or authentication). The wire protocol is
 unchanged: a key only encodes values that `RemoteAuth` and the TLS pin already
 use, so older hosts and clients keep working with the older separate fields.
-The pairing view's Advanced toggle (`a`) still shows those fields on a new host.
+The Share page's Advanced toggle (`a`) still shows those fields on a new host.
 
 Each session generates a fresh certificate authority and a leaf certificate
 for the bind address. A remote client must:

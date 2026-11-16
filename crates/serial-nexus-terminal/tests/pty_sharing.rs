@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use support::tui::{TuiSession, KEY_CTRL_BRACKET, KEY_CTRL_S, KEY_ENTER, KEY_ESC};
+use support::tui::{
+    TuiSession, KEY_CTRL_BRACKET, KEY_CTRL_S, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP,
+};
 use support::{start_core, PortListerGuard, SimulatedDevice};
 use tempfile::TempDir;
 
@@ -121,6 +123,62 @@ fn click_text(tui: &mut TuiSession, needle: &str) {
     tui.click(column, row);
 }
 
+/// Select a Share-page control using its keyboard-visible row, then activate
+/// it explicitly with Enter. This exercises the same path as keyboard users.
+fn activate_share_button(tui: &mut TuiSession, needle: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut direction = KEY_DOWN;
+    let mut previous = String::new();
+    let mut reached_edge = false;
+    loop {
+        let selected = (0..tui.rows())
+            .filter_map(|row| {
+                let line = tui.row(row);
+                line.contains("▸").then(|| line.to_string())
+            })
+            .next()
+            .unwrap_or_default();
+        if selected.contains(needle) {
+            tui.send(KEY_ENTER);
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "could not select {needle:?} with arrows:\n{}",
+            tui.text()
+        );
+        if !previous.is_empty() && selected == previous && !reached_edge {
+            direction = if direction == KEY_DOWN {
+                KEY_UP
+            } else {
+                KEY_DOWN
+            };
+            reached_edge = true;
+        }
+        previous = selected;
+        tui.send(direction);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Open the Share page from the sidebar and press its explicit Start button.
+/// A dirty draft asks for one more confirmation, which this helper accepts.
+fn start_sharing(tui: &mut TuiSession) {
+    tui.wait_for_text("[ Start sharing ]");
+    click_text(tui, "[ Start sharing ]");
+    if tui.text().contains("[ Save and start ]") {
+        click_text(tui, "[ Save and start ]");
+    }
+}
+
+/// Stop through the Share page's explicit two-step confirmation.
+fn stop_sharing(tui: &mut TuiSession) {
+    click_text(tui, "[ Stop sharing ]");
+    tui.wait_for_text("[ Confirm stop ]");
+    click_text(tui, "[ Confirm stop ]");
+    tui.wait_for_text("sharing stopped");
+}
+
 fn open_settings(tui: &mut TuiSession) {
     tui.click(3, tui.rows() - 3);
     tui.wait_for_text("focus: settings");
@@ -177,8 +235,12 @@ fn v_shows_a_whole_key_in_an_ordinary_80x24_split_pane() {
     tui.resize(24, 80);
     std::thread::sleep(Duration::from_millis(300));
     tui.send_text("s");
+    tui.wait_until("the Share page at 80x24", |text| {
+        text.contains("[ Start sharing ]")
+    });
+    start_sharing(&mut tui);
     tui.wait_for_text("Human terminal key");
-    tui.send_text("v");
+    activate_share_button(&mut tui, "[ Show human key ]");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !tui
         .raw_transcript()
@@ -196,7 +258,7 @@ fn v_shows_a_whole_key_in_an_ordinary_80x24_split_pane() {
     tui.wait_for_text("Human terminal key");
     // Quit at a size where the focus footer is visible.
     tui.resize(ROWS, COLS);
-    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("focus: share");
     tui.quit();
 }
 
@@ -235,24 +297,36 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: sidebar");
     click_text(&mut tui, "[ Share: off ]");
-    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("focus: share");
+    tui.wait_until("the Share page to show its explicit Start button", |text| {
+        text.contains("[ Start sharing ]")
+    });
+    assert!(
+        !tui.text().contains("Human terminal key"),
+        "opening the page starts nothing:\n{}",
+        tui.text()
+    );
+    start_sharing(&mut tui);
     tui.wait_for_text("Firewall and router settings");
     // The normal view shows two distinct, labelled sharing keys.
     tui.wait_for_text("Human terminal key");
     tui.wait_for_text("MCP/AI key");
-    tui.wait_until("both key prefixes on screen", |text| {
-        text.contains("snx1.human.") && text.contains("snx1.ai.")
+    tui.wait_until("the human key prefix on screen", |text| {
+        text.contains("snx1.human.")
     });
+    // The complete human key is long; the AI key follows below it and is
+    // reachable by scrolling. The copy buttons above act on the complete
+    // strings, not on what happens to be visible.
     assert!(
         !fixture.settings_text().contains("snx1."),
         "the settings file never holds a sharing key"
     );
 
-    // A hard-wrapped key cannot be selected without line breaks, so `c` and
-    // `C` ask the terminal to copy the complete unchanged strings.
-    tui.send_text("c");
+    // A hard-wrapped key cannot be selected without line breaks, so the
+    // explicit buttons ask the terminal to copy the complete strings.
+    activate_share_button(&mut tui, "[ Copy human key ]");
     wait_for_copied_key(&mut tui, "snx1.human.");
-    tui.send_text("C");
+    activate_share_button(&mut tui, "[ Copy MCP/AI key ]");
     wait_for_copied_key(&mut tui, "snx1.ai.");
     let copied = copied_keys(&tui.raw_transcript());
     assert!(copied.len() >= 2, "both keys were offered for copying");
@@ -267,13 +341,13 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
 
     // When the terminal ignores OSC 52, `v` shows the complete key as one
     // logical line that the terminal soft-wraps; copying that line does not
-    // add line breaks. Any key returns to the pairing view.
+    // add line breaks. Any key returns to the Share page.
     let human = copied
         .iter()
         .find(|key| key.starts_with("snx1.human."))
         .expect("the human key was offered")
         .clone();
-    tui.send_text("v");
+    activate_share_button(&mut tui, "[ Show human key ]");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let raw = tui.raw_transcript();
@@ -312,22 +386,30 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     tui.resize(ROWS, COLS);
     std::thread::sleep(Duration::from_millis(200));
     tui.send_text("x");
-    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("focus: share");
     tui.wait_for_text("Human terminal key");
 
-    // `a` shows the older host fields a terminal without keys needs.
-    tui.send_text("a");
+    // The explicit Advanced row shows the older host fields a terminal without keys needs.
+    activate_share_button(&mut tui, "[ Older host fields ]");
     tui.wait_for_text("Older host fields");
     tui.wait_for_text("certificate SHA-256");
     // The CA certificate is long: the separate credentials are below it.
-    for _ in 0..60 {
-        tui.send(b"\x1b[B");
-        std::thread::sleep(Duration::from_millis(15));
+    // The wheel scrolls the details three lines at a time, so the two nearby
+    // labels can be brought on screen together.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = tui.text();
+        if text.contains("human credential") && text.contains("MCP (AI) credential") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the separate credentials are reachable by scrolling"
+        );
+        tui.send(b"\x1b[<65;50;20M");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    tui.wait_until("the separate credentials", |text| {
-        text.contains("human credential") && text.contains("MCP (AI) credential")
-    });
-    tui.send_text("a");
+    activate_share_button(&mut tui, "[ Hide older host fields ]");
     tui.wait_for_text("Human terminal key");
     assert!(
         !fixture.settings_text().contains("credential"),
@@ -337,11 +419,11 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
     // A pane too short for the whole soft-wrapped line is refused rather
     // than clipped or written to disk. Enlarging it makes v work again.
     tui.resize(10, 40);
-    tui.wait_until("the pairing view redrawn at a narrow width", |text| {
+    tui.wait_until("the Share page redrawn at a narrow width", |text| {
         !text.contains("Esc back")
     });
     let narrow_offset = tui.raw_transcript().len();
-    tui.send_text("v");
+    activate_share_button(&mut tui, "[ Show human key ]");
     tui.wait_for_text("pane is too short");
     assert!(
         !tui.raw_transcript()[narrow_offset..]
@@ -350,8 +432,8 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         "a too-small pane shows no clipped key"
     );
     tui.resize(ROWS, COLS);
-    tui.wait_for_text("focus: pairing");
-    tui.send_text("v");
+    tui.wait_for_text("focus: share");
+    activate_share_button(&mut tui, "[ Show human key ]");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !tui.raw_transcript()[narrow_offset..]
         .windows(human.len())
@@ -364,13 +446,12 @@ fn the_host_checks_a_device_starts_sharing_sees_the_secrets_and_leaves_it_off() 
         std::thread::sleep(Duration::from_millis(20));
     }
     tui.send_text("x");
-    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("focus: share");
 
-    // The pairing screen survives a narrow resize and `s` stops the session.
+    // The Share page survives a narrow resize; Stop asks for confirmation.
     tui.resize(ROWS, COLS);
-    tui.wait_for_text("focus: pairing");
-    tui.send_text("s");
-    tui.wait_for_text("sharing stopped");
+    tui.wait_for_text("focus: share");
+    stop_sharing(&mut tui);
     tui.wait_for_text("[ Share: off ]");
 
     // Nothing listens after the terminal leaves.
@@ -399,7 +480,9 @@ fn a_bind_failure_is_shown_and_sharing_stays_off() {
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: sidebar");
     click_text(&mut tui, "[ Share: off ]");
-    tui.wait_for_text("sharing not started");
+    tui.wait_for_text("focus: share");
+    start_sharing(&mut tui);
+    tui.wait_for_text("could not bind");
     assert!(
         tui.text().contains("[ Share: off ]"),
         "sharing remains off:\n{}",
@@ -435,6 +518,8 @@ fn cancel_discards_the_checklist_and_the_share_button_refuses_an_empty_one() {
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: sidebar");
     click_text(&mut tui, "[ Share: off ]");
+    tui.wait_for_text("focus: share");
+    start_sharing(&mut tui);
     tui.wait_for_text("check at least one device");
     assert!(tui.text().contains("[ Share: off ]"));
 
@@ -458,7 +543,9 @@ fn quitting_the_owner_terminal_closes_the_listener_without_stopping_first() {
     tui.send(KEY_CTRL_S);
     tui.wait_for_text("settings saved");
     click_text(&mut tui, "[ Share: off ]");
-    tui.wait_for_text("focus: pairing");
+    tui.wait_for_text("focus: share");
+    start_sharing(&mut tui);
+    tui.wait_for_text("Human terminal key");
     std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener is up");
 
     // Leave the pairing screen but keep sharing on, then quit through the
@@ -510,5 +597,119 @@ fn a_large_paste_and_the_key_after_it_are_processed_without_another_wakeup() {
     tui.wait_until("the form to close after the paste", |text| {
         text.contains("focus: sidebar")
     });
+    tui.quit();
+}
+
+#[test]
+fn sidebar_entries_only_open_their_pages_and_keyboard_start_stop_confirms() {
+    let fixture = Fixture::new();
+    let path = fixture.device.path.clone();
+    let mut tui = fixture.tui();
+    tui.wait_for_text(&path);
+
+    // The sidebar's Share entry opens the page; it does not start a listener.
+    tui.send_text("s");
+    tui.wait_until("the Share page", |text| text.contains("[ Start sharing ]"));
+    assert!(
+        !tui.text().contains("Human terminal key"),
+        "opening the page shows no credentials:\n{}",
+        tui.text()
+    );
+    tui.send(KEY_ESC);
+    tui.wait_for_text("focus: stream");
+    tui.send(KEY_CTRL_BRACKET);
+    tui.wait_for_text("focus: sidebar");
+
+    // The Connect entry opens its page and connects to nothing.
+    tui.send_text("c");
+    tui.wait_for_text("Connect · sharing key");
+    assert!(
+        !tui.text().contains("Remote "),
+        "opening the Connect page adds no host:\n{}",
+        tui.text()
+    );
+    tui.send(KEY_ESC);
+    tui.wait_for_text("focus: sidebar");
+
+    // Configure a checked device and start from the keyboard: the Start row
+    // needs one activation, and a running session's Stop needs two.
+    open_settings(&mut tui);
+    check_device(&mut tui, &path);
+    set_port_zero(&mut tui);
+    tui.send(KEY_CTRL_S);
+    tui.wait_for_text("settings saved");
+    tui.send(KEY_CTRL_BRACKET);
+    tui.wait_for_text("focus: sidebar");
+    tui.send_text("s");
+    tui.wait_for_text("[ Start sharing ]");
+    // Address, Port, the local device, then Start.
+    for _ in 0..3 {
+        tui.send(KEY_DOWN);
+    }
+    tui.send(KEY_ENTER);
+    tui.wait_for_text("Human terminal key");
+    tui.wait_for_text("[ Stop sharing ]");
+    tui.send(KEY_ENTER);
+    tui.wait_for_text("[ Confirm stop ]");
+    assert!(
+        tui.text().contains("[ Stop sharing ]") || tui.text().contains("[ Confirm stop ]"),
+        "the first press only asks"
+    );
+    tui.send(KEY_ENTER);
+    tui.wait_for_text("sharing stopped");
+    tui.wait_for_text("[ Share: off ]");
+    tui.quit();
+}
+
+#[test]
+fn the_connect_page_accepts_a_long_paste_and_clears_only_the_key() {
+    let fixture = Fixture::new();
+    let mut tui = fixture.tui();
+    tui.wait_for_text("focus: sidebar");
+    tui.send_text("c");
+    tui.wait_for_text("Connect · sharing key");
+    tui.send_text("192.0.2.10");
+    tui.send(KEY_TAB);
+    tui.send_text("7331");
+    tui.send(KEY_TAB);
+    let key = format!("snx1.human.{}", "B".repeat(2_000));
+    tui.send(format!("\x1b[200~{key}\x1b[201~").as_bytes());
+    // The long key is masked but present; clearing it keeps the endpoint.
+    let (column, row) = tui.find("[ Clear key ]").expect("a Clear key button");
+    tui.click(column, row);
+    tui.wait_until("the cleared masked key field", |text| {
+        text.lines()
+            .any(|line| line.contains("Human sharing key") && !line.contains('•'))
+    });
+    tui.send(KEY_ENTER);
+    tui.wait_for_text("sharing key");
+    tui.wait_for_text("192.0.2.10");
+    assert!(
+        !tui.text().contains(&key),
+        "the key is never drawn or logged in clear text"
+    );
+    tui.quit();
+}
+
+#[test]
+fn an_ordinary_notice_clears_itself_in_the_real_terminal() {
+    let fixture = Fixture::new();
+    let mut tui = fixture.tui();
+    tui.wait_for_text(&fixture.device.path);
+    tui.wait_for_text("focus: sidebar");
+    tui.send_text("d");
+    tui.wait_for_text("highlight an attached device first");
+    let deadline = std::time::Instant::now() + Duration::from_secs(9);
+    loop {
+        if !tui.text().contains("highlight an attached device first") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "an ordinary notice clears itself after about six seconds:\n{}",
+            tui.text()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     tui.quit();
 }

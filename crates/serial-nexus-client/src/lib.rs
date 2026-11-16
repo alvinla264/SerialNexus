@@ -57,7 +57,7 @@
 //! An AI client opens a device with `request_control = true` to get write
 //! control. If another AI holds it, the call succeeds read-only and the result
 //! says who holds it. Writing without control fails with
-//! [`ErrorCode::ControlHeld`](serial_nexus_protocol::ErrorCode::ControlHeld).
+//! [`ErrorCode::ControlHeld`].
 //! Control expires after five minutes without a request from its holder; the
 //! holder calls `open` again (same arguments) to reclaim it. Human clients
 //! always write without taking control.

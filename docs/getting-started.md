@@ -193,19 +193,20 @@ your user can start or change sharing, so run only trusted software as that
 user. The path between two physical computers has not been verified; the
 automated sharing tests use loopback TLS (see
 [Verification status](#verification-status)). The human terminal is the owner:
-open Settings, set a concrete IPv4 or IPv6 address
-and port, tick the devices to share, Save, and start sharing from the sidebar's
-Share button (or `s`). See
+open the Share page from the sidebar's Share button (or `s`/`p`), set a
+concrete IPv4 or IPv6 address and port, tick the devices to share, then use the
+page's explicit Start sharing button. Opening the page never starts a listener.
+See
 [Sharing devices on the LAN from the terminal](clients.md#sharing-devices-on-the-lan-from-the-terminal)
 for the controls.
 
-The pairing view shows two clearly labelled, distinct **sharing keys**, one for
+The Share page shows two clearly labelled, distinct **sharing keys**, one for
 a human terminal and one for MCP/AI. Each key bundles what authenticates the
 host with that role's credential:
 
 - the **human key** goes into another terminal's Connect form, together with
-  the host address and port (press `c` in the pairing view to copy the complete
-  key, since selecting the wrapped rows adds line breaks);
+  the host address and port (use the page's Copy human key button
+  for the complete key, since selecting the wrapped rows adds line breaks);
 - the **AI key** is for the local terminal's MCP pairing action (`m` in the
   sidebar), together with the host address and port. It writes the
   owner-only `mcp-peers.json` that `serial-nexus-mcp` reads; follow the setup
@@ -216,7 +217,7 @@ Treat either key as a password. Do not paste it into shell history, a
 repository, an issue or a tool call. Keys and credentials are per sharing
 session: stopping or restarting sharing invalidates the old ones, new ones must
 be paired, and an old key fails rather than connecting insecurely. Press `a` in
-the pairing view for the older separate fields when a terminal predates keys.
+the Share page for the older separate fields when a terminal predates keys.
 
 **Exposure.** The listener exists only on the chosen address, and only while
 the terminal that started sharing is running. Firewall rules and router/NAT
