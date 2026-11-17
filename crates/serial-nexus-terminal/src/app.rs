@@ -1411,11 +1411,15 @@ impl App {
             PairingRole::Human => "human terminal key",
             PairingRole::Ai => "MCP/AI key",
         };
+        let fallback = match role {
+            PairingRole::Human => "Show human key",
+            PairingRole::Ai => "Show MCP/AI key",
+        };
         match SharingKey::encode(&pairing.host, secret) {
             Ok(key) => {
                 self.state.clipboard_copy = Some(ClipboardCopy { label, key });
                 self.state.info(format!(
-                    "copy requested for the {label} — the terminal may ignore it; use v or V to select the key"
+                    "copy requested for the {label}; if unavailable, activate [ {fallback} ]"
                 ));
             }
             Err(error) => {
@@ -1720,13 +1724,6 @@ impl App {
         self.state.drop_replaced_checks();
         let desired: Vec<String> = self.state.draft_checked.iter().cloned().collect();
         let expected = self.state.draft_checked.identities();
-        if desired.is_empty() {
-            self.restore_settings_checklists(original_draft_checked, original_pending_checked);
-            self.share_save_failed(
-                "check at least one device before changing the active endpoint".to_string(),
-            );
-            return;
-        }
         let Some(store) = self.settings_store.clone() else {
             self.restore_settings_checklists(original_draft_checked, original_pending_checked);
             self.share_save_failed("no settings file".to_string());

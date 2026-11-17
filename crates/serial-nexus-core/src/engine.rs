@@ -1886,17 +1886,11 @@ impl Engine {
                 "the replacement endpoint is unchanged",
             ));
         }
-        if params.devices.is_empty() {
-            return Err(ErrorBody::new(
-                ErrorCode::BadRequest,
-                "check at least one device before changing the active endpoint",
-            ));
-        }
         let identities = self.validated_shared_identities(&params.devices, &params.expected)?;
-        if identities.is_empty() || identities.len() > MAX_SHARED_DEVICES {
+        if identities.len() > MAX_SHARED_DEVICES {
             return Err(ErrorBody::new(
                 ErrorCode::LimitExceeded,
-                format!("the replacement must share between one and {MAX_SHARED_DEVICES} devices"),
+                format!("at most {MAX_SHARED_DEVICES} devices may be shared in one session"),
             ));
         }
         // Binding and fresh key/certificate creation happen before settings

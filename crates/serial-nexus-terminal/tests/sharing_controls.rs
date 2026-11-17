@@ -1131,6 +1131,13 @@ fn secrets_are_not_put_in_notices() {
     save(&mut app);
     start(&mut app);
     let (_, human, ai) = pairing(&app);
+    app.copy_pairing_key(PairingRole::Human);
+    let copy_notice = app.state.notice.as_ref().expect("copy notice");
+    assert!(
+        copy_notice.text.contains("Show human key"),
+        "{copy_notice:?}"
+    );
+    assert!(!copy_notice.text.contains("v or V"), "{copy_notice:?}");
     let notices: Vec<String> = app
         .state
         .notice
@@ -1569,7 +1576,7 @@ fn an_ipv6_endpoint_spelling_does_not_block_an_active_checklist_save() {
 }
 
 #[test]
-fn an_empty_checklist_cannot_destroy_the_running_share() {
+fn an_empty_checklist_is_applied_with_active_endpoint_handover() {
     let (fixture, devices) = Fixture::new();
     let mut app = fixture.app();
     let path = devices[0].path.clone();
@@ -1585,6 +1592,7 @@ fn an_empty_checklist_cannot_destroy_the_running_share() {
         .as_ref()
         .and_then(|snapshot| snapshot.bind)
         .expect("the old listener is bound");
+    let old_keys = pairing(&app);
 
     // Uncheck every device and ask to move the endpoint at the same time.
     app.state.draft_checked = Checklist::new();
@@ -1607,27 +1615,12 @@ fn an_empty_checklist_cannot_destroy_the_running_share() {
         app.state.sharing.active,
         "the running share was not stopped"
     );
-    assert_eq!(
-        app.state
-            .sharing
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.bind),
-        Some(old_bind),
-        "the listener did not move"
-    );
-    assert_eq!(
-        app.state.settings.share_port, 0,
-        "preferences did not change"
-    );
-    assert!(
-        app.state
-            .share_error
-            .as_deref()
-            .is_some_and(|error| error.contains("at least one device")),
-        "{:?}",
-        app.state.share_error
-    );
+    let new_snapshot = app.state.sharing.snapshot.as_ref().expect("new share");
+    assert_ne!(new_snapshot.bind, Some(old_bind), "the listener moved");
+    assert!(new_snapshot.checked.is_empty(), "the empty ACL was applied");
+    assert_eq!(app.state.settings.share_port, free_port);
+    assert_ne!(pairing(&app), old_keys, "endpoint change rotated the keys");
+    assert!(app.state.share_error.is_none());
     app.shutdown();
 }
 
