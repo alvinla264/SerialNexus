@@ -328,6 +328,83 @@ fn unchecking_while_sharing_revokes_the_remote_client_and_leaves_other_devices_a
 }
 
 #[test]
+fn settings_save_confirms_and_applies_an_active_endpoint_handover() {
+    let (fixture, devices) = Fixture::new();
+    let mut app = fixture.app();
+    let path = devices[0].path.clone();
+    check_device(&mut app, &path);
+    set_bind(&mut app, "127.0.0.1", 0);
+    save(&mut app);
+    start(&mut app);
+    let old_bind = app
+        .state
+        .sharing
+        .snapshot
+        .as_ref()
+        .expect("active snapshot")
+        .bind
+        .expect("active bind");
+    let (old_host, old_human, _) = pairing(&app);
+    let old_remote = RemoteClient::connect(
+        &old_host,
+        &old_human,
+        Some("settings-handover-peer".into()),
+        Duration::from_secs(5),
+    )
+    .expect("old remote connects");
+
+    app.state.begin_settings();
+    app.state.draft.share_address = "127.0.0.2".into();
+    save(&mut app);
+    assert!(app.state.settings_rebind_confirm);
+    assert_eq!(app.state.view, View::Settings);
+    assert_eq!(
+        app.state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind),
+        Some(old_bind)
+    );
+    assert!(
+        old_remote.list_devices().is_ok(),
+        "first Save keeps old peer live"
+    );
+    assert_eq!(pairing(&app).1.credential, old_human.credential);
+
+    app.handle_key(serial_nexus_terminal::input::Key::Esc);
+    assert!(!app.state.settings_rebind_confirm);
+    assert_eq!(app.state.view, View::Settings);
+    assert_eq!(app.state.draft.share_address, "127.0.0.2");
+    assert!(
+        old_remote.list_devices().is_ok(),
+        "cancel keeps old peer live"
+    );
+    save(&mut app);
+    assert!(app.state.settings_rebind_confirm);
+
+    save(&mut app);
+    assert!(!app.state.settings_rebind_confirm);
+    assert_eq!(app.state.settings.share_address, "127.0.0.2");
+    assert!(app.state.sharing.active);
+    assert_eq!(
+        app.state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind)
+            .map(|bind| bind.ip()),
+        Some("127.0.0.2".parse().expect("new IP"))
+    );
+    assert!(
+        !old_remote.is_connected(),
+        "confirmed change disconnects old peer"
+    );
+    assert_ne!(pairing(&app).1.credential, old_human.credential);
+    app.shutdown();
+}
+
+#[test]
 fn a_confirmed_active_endpoint_handover_disconnects_old_remotes_and_rotates_keys() {
     let (fixture, devices) = Fixture::new();
     let mut app = fixture.app();

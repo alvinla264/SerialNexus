@@ -216,8 +216,9 @@ host with that role's credential:
 Treat either key as a password. Do not paste it into shell history, a
 repository, an issue or a tool call. Keys and credentials are per sharing
 session: stopping or restarting sharing invalidates the old ones, new ones must
-be paired, and an old key fails rather than connecting insecurely. Press `a` in
-the Share page for the older separate fields when a terminal predates keys.
+be paired, and an old key fails rather than connecting insecurely. Select the
+Share page's **Advanced** control to show the older separate fields when a
+terminal predates keys.
 
 **Exposure.** The listener exists only on the chosen address, and only while
 the terminal that started sharing is running. Firewall rules and router/NAT

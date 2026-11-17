@@ -289,15 +289,15 @@ pub fn settings_layout(right: Rect) -> Option<SettingsLayout> {
         right.width,
         right.height - title_height - 1 - hint_height,
     );
-    // `[ Save ]` first, then `[ Cancel ]`, both wide enough to read.
-    let save_width = 8;
+    // Reserve enough room for `[ Confirm ]` as well as `[ Save ]`.
+    let save_width = 11.min(bar.width.saturating_sub(3));
     let cancel_width = 10;
-    let save = Rect::new(bar.x + 1, bar.y, save_width.min(bar.width), 1);
+    let save = Rect::new(bar.x + 1, bar.y, save_width, 1);
     let cancel_x = save.x + save.width + 2;
     let cancel = Rect::new(
         cancel_x,
         bar.y,
-        cancel_width.min(bar.x + bar.width - cancel_x),
+        cancel_width.min(bar.x.saturating_add(bar.width).saturating_sub(cancel_x)),
         1,
     );
     Some(SettingsLayout {
@@ -938,7 +938,18 @@ fn draw_settings(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u
     };
     if layout.title.height > 0 {
         let title_style = focus_title_style(state.focus == Focus::Right);
-        put(buffer, layout.title, 0, " Settings ", title_style);
+        let title = if state.settings_rebind_confirm {
+            " Confirm endpoint change "
+        } else {
+            " Settings "
+        };
+        put(
+            buffer,
+            layout.title,
+            0,
+            &fit(title, layout.title.width as usize),
+            title_style,
+        );
     }
     let first = settings_first_row(state, layout);
     let visible = layout.rows.height.max(1) as usize;
@@ -989,7 +1000,14 @@ fn draw_settings(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u
         buffer,
         layout.save,
         0,
-        &fit("[ Save ]", layout.save.width as usize),
+        &fit(
+            if state.settings_rebind_confirm {
+                "[ Confirm ]"
+            } else {
+                "[ Save ]"
+            },
+            layout.save.width as usize,
+        ),
         button,
     );
     let quiet = RStyle::default().fg(RColor::Cyan);
@@ -1010,7 +1028,11 @@ fn draw_settings(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u
                 1,
             ),
             0,
-            "Space/Enter toggles · Enter edits the address or port · Ctrl+S saves · Esc cancels",
+            if state.settings_rebind_confirm {
+                "Remotes disconnect; fresh long keys"
+            } else {
+                "Space/Enter toggles · Enter edits address/port · Ctrl+S saves · Esc cancels"
+            },
             dim(),
         );
     }
@@ -2599,6 +2621,21 @@ mod tests {
         state.settings_row = 1;
         let cursor = render(&state, &mut buffer, area).expect("cursor");
         assert_eq!(cursor.1, rows.y + 1);
+    }
+
+    #[test]
+    fn settings_rebind_confirmation_explains_disconnect_and_key_rotation() {
+        let mut state = demo();
+        state.begin_settings();
+        state.settings_rebind_confirm = true;
+
+        let text = screen(&state, 100, 16).join("\n");
+        assert!(text.contains("Confirm endpoint change"), "{text}");
+        assert!(text.contains("[ Confirm ]"), "{text}");
+        assert!(
+            text.contains("Remotes disconnect; fresh long keys"),
+            "{text}"
+        );
     }
 
     #[test]

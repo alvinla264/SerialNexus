@@ -28,6 +28,14 @@ and there is no network listener unless a local owner starts one.
    clients can use only their role and checked-device permissions and cannot
    control sharing.
 
+On either the Share page or Settings, saving a changed active endpoint asks for
+confirmation because handover disconnects remote clients and issues fresh long
+keys. Cancel leaves the effective share unchanged. The terminal binds and
+prepares the replacement before publishing settings; a bind/preparation or
+settings-publication failure keeps the old listener, keys and remote clients
+and leaves the draft available for correction. Successful confirmation switches
+to the prepared listener and revokes the old session.
+
 ## Pairing and roles
 
 `ShareStart` answers with `ShareSessionInfo`, the only server response that
@@ -70,7 +78,7 @@ credentials, so stopping or restarting sharing produces different keys and old
 ones fail the TLS trust/pin check (or authentication). The wire protocol is
 unchanged: a key only encodes values that `RemoteAuth` and the TLS pin already
 use, so older hosts and clients keep working with the older separate fields.
-The Share page's Advanced toggle (`a`) still shows those fields on a new host.
+The Share page's **Advanced** control still shows those fields on a new host.
 
 Each session generates a fresh certificate authority and a leaf certificate
 for the bind address. A remote client must:

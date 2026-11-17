@@ -911,6 +911,8 @@ pub struct AppState {
     pub selected_button: Option<SidebarButton>,
     /// Whether the sharing address or port row is taking typed text.
     pub settings_editing: bool,
+    /// Whether the next Settings Save must confirm active endpoint handover.
+    pub settings_rebind_confirm: bool,
     /// The port as typed, so a half-entered value survives until Save.
     pub port_text: String,
     /// Selected row of the settings view.
@@ -979,6 +981,7 @@ impl AppState {
             prompt: None,
             quit: false,
             settings_editing: false,
+            settings_rebind_confirm: false,
             port_text: String::new(),
             settings_row: 0,
             pairing_scroll: 0,
@@ -1202,6 +1205,7 @@ impl AppState {
 
     /// Move the settings selection, staying on a real row.
     pub fn move_settings_row(&mut self, delta: i32) {
+        self.settings_rebind_confirm = false;
         let last = self.settings_row_count().saturating_sub(1);
         self.settings_row = (self.settings_row as i32 + delta).clamp(0, last as i32) as usize;
         self.settings_editing = false;
@@ -1210,6 +1214,7 @@ impl AppState {
     /// Flip the selected flag or device checkbox in the draft. Text rows are
     /// edited by typing, never toggled, and return `None`.
     pub fn toggle_draft(&mut self) -> Option<bool> {
+        self.settings_rebind_confirm = false;
         match self.settings_kind(self.settings_row)? {
             SettingsRow::LocalEcho => {
                 self.draft.local_echo = !self.draft.local_echo;
@@ -1252,6 +1257,7 @@ impl AppState {
 
     /// Start typing into the selected address or port row.
     pub fn begin_settings_edit(&mut self) -> bool {
+        self.settings_rebind_confirm = false;
         let Some((text, _)) = self.selected_settings_text_mut() else {
             return false;
         };
@@ -1263,6 +1269,7 @@ impl AppState {
 
     /// Add one typed character to the selected text row.
     pub fn settings_edit_push(&mut self, ch: char) {
+        self.settings_rebind_confirm = false;
         if !self.settings_editing || !ch.is_ascii_graphic() {
             return;
         }
@@ -1274,6 +1281,7 @@ impl AppState {
     }
 
     pub fn settings_edit_backspace(&mut self) {
+        self.settings_rebind_confirm = false;
         if self.settings_editing {
             if let Some((text, _)) = self.selected_settings_text_mut() {
                 text.pop();
@@ -1314,6 +1322,7 @@ impl AppState {
         self.port_text = self.draft.share_port.to_string();
         self.settings_row = 0;
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.view = View::Settings;
         // A serious warning is the human's to dismiss, not this page's to
         // erase. An ordinary notice may give way to the new view.
@@ -1326,6 +1335,7 @@ impl AppState {
         self.draft_checked = self.sharing.pending_checked.clone();
         self.port_text = self.draft.share_port.to_string();
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.leave_settings();
     }
 
@@ -1337,6 +1347,7 @@ impl AppState {
         self.port_text = self.settings.share_port.to_string();
         self.sharing.pending_checked = self.draft_checked.clone();
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.apply_scrollback();
         self.leave_settings();
     }

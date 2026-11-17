@@ -506,7 +506,7 @@ impl App {
             Action::SettingsEditBackspace => self.state.settings_edit_backspace(),
             Action::SettingsEditDone => self.state.end_settings_edit(),
             Action::SettingsSave => self.save_settings(),
-            Action::SettingsCancel => self.state.cancel_settings(),
+            Action::SettingsCancel => self.cancel_settings(),
             Action::OpenShare => self.open_share(),
             Action::ShareMove(delta) => self.share_move(delta),
             Action::ShareBeginEdit => {
@@ -753,7 +753,7 @@ impl App {
                         }
                     }
                     Some(SettingsHit::Save) => self.save_settings(),
-                    Some(SettingsHit::Cancel) => self.state.cancel_settings(),
+                    Some(SettingsHit::Cancel) => self.cancel_settings(),
                     Some(SettingsHit::Flag(_)) | None => {}
                 }
             } else if self.state.view == View::Share {
@@ -934,8 +934,26 @@ impl App {
         self.state.sharing.pending_checked = pending_checked;
     }
 
+    fn cancel_settings(&mut self) {
+        if self.state.settings_rebind_confirm {
+            self.state.settings_rebind_confirm = false;
+        } else {
+            self.state.cancel_settings();
+        }
+    }
+
     fn save_settings(&mut self) {
         self.state.end_settings_edit();
+        if self.state.sharing.active && self.active_endpoint_changed() {
+            if !self.state.settings_rebind_confirm {
+                self.state.settings_rebind_confirm = true;
+                return;
+            }
+            self.state.settings_rebind_confirm = false;
+            self.share_save_rebind();
+            return;
+        }
+        self.state.settings_rebind_confirm = false;
         match self.persist_draft() {
             Ok(()) => {
                 self.state.commit_settings();
@@ -1602,42 +1620,7 @@ impl App {
     fn share_save(&mut self) {
         self.state.end_share_edit();
         let was_active = self.state.sharing.active;
-        // Compare the parsed endpoints, not the raw address text: canonical
-        // IPv6 spellings and interface scopes must not look like a change.
-        let current_bind = self
-            .state
-            .sharing
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.bind)
-            .map(|bound| match bound {
-                std::net::SocketAddr::V4(address) => {
-                    ShareBind::new(std::net::IpAddr::V4(*address.ip()), address.port())
-                }
-                std::net::SocketAddr::V6(address) => ShareBind::with_scope(
-                    std::net::IpAddr::V6(*address.ip()),
-                    address.port(),
-                    address.scope_id(),
-                ),
-            });
-        let endpoint_changed = if was_active {
-            match (
-                current_bind.or_else(|| self.share_bind().ok()),
-                self.draft_share_bind().ok(),
-            ) {
-                (Some(current), Some(draft)) => {
-                    draft != current
-                        && !(draft.port == 0
-                            && self.state.settings.share_port == 0
-                            && draft.address == current.address
-                            && draft.scope_id == current.scope_id)
-                }
-                _ => true,
-            }
-        } else {
-            false
-        };
-        if was_active && endpoint_changed {
+        if was_active && self.active_endpoint_changed() {
             if self.state.share_confirm != Some(crate::state::ShareConfirm::Rebind) {
                 self.state.share_confirm = Some(crate::state::ShareConfirm::Rebind);
                 self.state.share_error = None;
@@ -1657,11 +1640,50 @@ impl App {
         }
     }
 
+    /// Compare parsed endpoints so equivalent IPv6 spellings/scopes and an
+    /// unchanged ephemeral-port setting do not cause an unnecessary handover.
+    fn active_endpoint_changed(&self) -> bool {
+        if !self.state.sharing.active {
+            return false;
+        }
+        let current_bind = self
+            .state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind)
+            .map(|bound| match bound {
+                std::net::SocketAddr::V4(address) => {
+                    ShareBind::new(std::net::IpAddr::V4(*address.ip()), address.port())
+                }
+                std::net::SocketAddr::V6(address) => ShareBind::with_scope(
+                    std::net::IpAddr::V6(*address.ip()),
+                    address.port(),
+                    address.scope_id(),
+                ),
+            });
+        match (
+            current_bind.or_else(|| self.share_bind().ok()),
+            self.draft_share_bind().ok(),
+        ) {
+            (Some(current), Some(draft)) => {
+                draft != current
+                    && !(draft.port == 0
+                        && self.state.settings.share_port == 0
+                        && draft.address == current.address
+                        && draft.scope_id == current.scope_id)
+            }
+            _ => true,
+        }
+    }
+
     /// Replace an active listener only after the candidate is bound and the
     /// chosen settings are reversibly published. Preparation and persistence
     /// failures discard the candidate and leave the old share untouched.
     fn share_save_rebind(&mut self) {
+        let from_settings = self.state.view == View::Settings;
         self.state.share_confirm = None;
+        self.state.settings_rebind_confirm = false;
         let bind = match self.draft_share_bind() {
             Ok(bind) => bind,
             Err(message) => {
@@ -1749,7 +1771,11 @@ impl App {
             Ok(info) => {
                 publication.confirm();
                 self.state.draft = draft;
-                self.state.commit_share_draft();
+                if from_settings {
+                    self.state.commit_settings();
+                } else {
+                    self.state.commit_share_draft();
+                }
                 self.state.sharing.pairing = Some(info);
                 self.sync_share_status();
                 self.state.info(
@@ -1846,15 +1872,18 @@ impl App {
         }
     }
 
-    /// Show a failed Share save in its form. An outcome the core may already
-    /// have applied is serious: it also becomes a sticky warning so moving the
-    /// selection cannot hide it before the human acknowledges it.
+    /// Show a failed Share or Settings save in its current view. An outcome
+    /// the core may already have applied is serious: it becomes a sticky
+    /// warning so moving the selection cannot hide it before acknowledgement.
     fn share_save_failed(&mut self, message: String) {
+        let notice = format!("share settings not saved: {message}");
         if message.contains("unknown") {
-            self.state
-                .warning(format!("share settings not saved: {message}"));
+            self.state.warning(notice);
+        } else if self.state.view == View::Settings {
+            self.state.error(notice);
+        } else {
+            self.state.share_error = Some(message);
         }
-        self.state.share_error = Some(message);
     }
 
     /// Ask a remote host for its address, port and pairing information. The
