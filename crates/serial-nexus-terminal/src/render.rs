@@ -372,7 +372,11 @@ fn share_layout(state: &AppState, right: Rect) -> Option<ShareLayout> {
     }
     let title_height = if right.height >= 3 { 1 } else { 0 };
     let hints_height = if right.height >= 5 { 1 } else { 0 };
-    let error_height = u16::from(state.share_error.is_some() && right.height >= 2);
+    let error_height = u16::from(
+        (state.share_error.is_some()
+            || state.share_confirm == Some(crate::state::ShareConfirm::Rebind))
+            && right.height >= 2,
+    );
     let content_height = right
         .height
         .saturating_sub(title_height + hints_height + error_height);
@@ -1284,7 +1288,13 @@ fn draw_share(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16,
                     }
                 )
             }
-            crate::state::ShareRow::Save => format!("{marker} [ Save ]"),
+            crate::state::ShareRow::Save => {
+                if state.share_confirm == Some(crate::state::ShareConfirm::Rebind) {
+                    format!("{marker} [ Confirm change ]")
+                } else {
+                    format!("{marker} [ Save ]")
+                }
+            }
             crate::state::ShareRow::Cancel => format!("{marker} [ Cancel ]"),
             crate::state::ShareRow::CopyHuman => format!("{marker} [ Copy human key ]"),
             crate::state::ShareRow::CopyAi => format!("{marker} [ Copy MCP/AI key ]"),
@@ -1349,13 +1359,18 @@ fn draw_share(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u16,
     let error_style = RStyle::default().fg(RColor::White).bg(RColor::Red);
     let mut error_shown = false;
     if let Some(error) = layout.error {
-        put(
-            buffer,
-            error,
-            0,
-            &format!(" {} ", state.share_error.as_deref().unwrap_or_default()),
-            error_style,
-        );
+        let rebind_warning = state.share_confirm == Some(crate::state::ShareConfirm::Rebind);
+        let text = state.share_error.as_deref().unwrap_or(if rebind_warning {
+            "Remote clients disconnect; fresh long keys are issued."
+        } else {
+            ""
+        });
+        let style = if rebind_warning {
+            RStyle::default().fg(RColor::Black).bg(RColor::Yellow)
+        } else {
+            error_style
+        };
+        put(buffer, error, 0, &format!(" {text} "), style);
         error_shown = true;
     } else if let Some(error) = &state.share_error {
         // A short page has no dedicated error row; the hint row carries the
@@ -2988,6 +3003,19 @@ mod tests {
             "nothing is shared before Start: {text}"
         );
         assert!(text.contains("Enter edit or activate"), "{text}");
+    }
+
+    #[test]
+    fn an_active_endpoint_save_confirmation_names_disconnect_and_key_rotation() {
+        let mut state = demo();
+        state.begin_share();
+        state.sharing.active = true;
+        state.share_confirm = Some(crate::state::ShareConfirm::Rebind);
+        state.draft.share_port = state.settings.share_port.saturating_add(1);
+        let text = screen(&state, 100, 24).join("\\n");
+        assert!(text.contains("[ Confirm change ]"), "{text}");
+        assert!(text.contains("Remote clients disconnect"), "{text}");
+        assert!(text.contains("fresh long keys are issued"), "{text}");
     }
 
     #[test]

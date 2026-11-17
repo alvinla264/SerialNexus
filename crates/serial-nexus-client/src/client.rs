@@ -11,9 +11,9 @@ use serial_nexus_protocol::{
     encode_bytes, paths, ClientInfo, DeviceRef, DeviceStatus, DevicesResult, Event, GatewayConnect,
     GatewayHandshake, GatewayTarget, HelloParams, HelloResult, Limits, OpenParams, OpenResult,
     ReadParams, ReadResult, Request, RequestMessage, ResponseData, ServerMessage, ShareBind,
-    ShareCommitParams, ShareDevicesParams, ShareSessionInfo, ShareStartParams, SharingSnapshot,
-    WaitSpec, WriteParams, WriteResult, GATEWAY_PROTOCOL_VERSION, MAX_GATEWAY_MESSAGE_BYTES,
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
+    ShareCommitParams, ShareDevicesParams, ShareRebindParams, ShareSessionInfo, ShareStartParams,
+    SharingSnapshot, WaitSpec, WriteParams, WriteResult, GATEWAY_PROTOCOL_VERSION,
+    MAX_GATEWAY_MESSAGE_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::autostart::{find_core_binary, spawn_core};
@@ -488,6 +488,55 @@ impl Client {
             self.timeout(),
         )? {
             ResponseData::Sharing(snapshot) => Ok(snapshot),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Prepare and bind a new active endpoint while leaving the old listener,
+    /// credentials, checklist, and remote clients intact. The owner persists
+    /// preferences before committing or cancels this prepared candidate.
+    pub fn prepare_share_rebind_expected(
+        &self,
+        bind: ShareBind,
+        devices: Vec<String>,
+        expected: BTreeMap<String, String>,
+    ) -> Result<serial_nexus_protocol::SharePrepared, ClientError> {
+        match self.request(
+            Request::ShareRebindPrepare(ShareRebindParams {
+                bind,
+                devices,
+                expected,
+            }),
+            self.timeout(),
+        )? {
+            ResponseData::SharePrepared(prepared) if prepared.bound.is_some() => Ok(prepared),
+            ResponseData::SharePrepared(_) => Err(ClientError::UnexpectedResponse(
+                "the core omitted the prepared endpoint address".into(),
+            )),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Commit an already-bound replacement, closing old remotes and returning
+    /// the new session's fresh owner-only pairing keys.
+    pub fn commit_share_rebind(&self, token: String) -> Result<ShareSessionInfo, ClientError> {
+        match self.request(
+            Request::ShareRebindCommit(ShareCommitParams { token }),
+            self.timeout(),
+        )? {
+            ResponseData::ShareStarted(info) => Ok(info),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    /// Release the prepared replacement listener without changing the active
+    /// sharing session.
+    pub fn cancel_share_rebind(&self, token: String) -> Result<(), ClientError> {
+        match self.request(
+            Request::ShareRebindCancel(ShareCommitParams { token }),
+            self.timeout(),
+        )? {
+            ResponseData::Pong => Ok(()),
             other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
         }
     }

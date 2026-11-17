@@ -1604,22 +1604,49 @@ impl App {
         let was_active = self.state.sharing.active;
         // Compare the parsed endpoints, not the raw address text: canonical
         // IPv6 spellings and interface scopes must not look like a change.
-        let previous_bind = self.share_bind().ok();
-        let endpoint_changed = match (previous_bind, self.draft_share_bind().ok()) {
-            (Some(previous), Some(draft)) => previous != draft,
-            _ => true,
+        let current_bind = self
+            .state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind)
+            .map(|bound| match bound {
+                std::net::SocketAddr::V4(address) => {
+                    ShareBind::new(std::net::IpAddr::V4(*address.ip()), address.port())
+                }
+                std::net::SocketAddr::V6(address) => ShareBind::with_scope(
+                    std::net::IpAddr::V6(*address.ip()),
+                    address.port(),
+                    address.scope_id(),
+                ),
+            });
+        let endpoint_changed = if was_active {
+            match (
+                current_bind.or_else(|| self.share_bind().ok()),
+                self.draft_share_bind().ok(),
+            ) {
+                (Some(current), Some(draft)) => {
+                    draft != current
+                        && !(draft.port == 0
+                            && self.state.settings.share_port == 0
+                            && draft.address == current.address
+                            && draft.scope_id == current.scope_id)
+                }
+                _ => true,
+            }
+        } else {
+            false
         };
         if was_active && endpoint_changed {
-            // A listener cannot move without closing and reissuing every
-            // credential. Refusing here keeps the running session, its
-            // credentials and its remote clients exactly as they were; the
-            // human stops sharing first when they really want a new endpoint.
-            self.share_save_failed(
-                "stop sharing before changing the address or port; the running share is unchanged"
-                    .to_string(),
-            );
+            if self.state.share_confirm != Some(crate::state::ShareConfirm::Rebind) {
+                self.state.share_confirm = Some(crate::state::ShareConfirm::Rebind);
+                self.state.share_error = None;
+                return;
+            }
+            self.share_save_rebind();
             return;
         }
+        self.state.share_confirm = None;
 
         match self.persist_draft() {
             Ok(()) => {
@@ -1627,6 +1654,167 @@ impl App {
                 self.state.info("share settings saved");
             }
             Err(message) => self.share_save_failed(message),
+        }
+    }
+
+    /// Replace an active listener only after the candidate is bound and the
+    /// chosen settings are reversibly published. Preparation and persistence
+    /// failures discard the candidate and leave the old share untouched.
+    fn share_save_rebind(&mut self) {
+        self.state.share_confirm = None;
+        let bind = match self.draft_share_bind() {
+            Ok(bind) => bind,
+            Err(message) => {
+                self.share_save_failed(message);
+                return;
+            }
+        };
+        let original_draft_checked = self.state.draft_checked.clone();
+        let original_pending_checked = self.state.sharing.pending_checked.clone();
+        if let Some(snapshot) = self
+            .state
+            .sharing
+            .snapshot
+            .as_ref()
+            .filter(|_| self.state.sharing.active)
+        {
+            let detected = self.state.detected_local_identities();
+            let expected = self.state.draft_checked.identities();
+            let unverified = snapshot.checked.iter().any(|device| {
+                self.state.draft_checked.contains(&device.path)
+                    && !matches!(
+                        (detected.get(&device.path), expected.get(&device.path)),
+                        (Some(Some(current)), Some(recorded)) if current == recorded
+                    )
+            });
+            if unverified {
+                self.share_save_failed(
+                    "cannot verify a checked device identity; refresh discovery before changing the endpoint"
+                        .to_string(),
+                );
+                return;
+            }
+        }
+        self.state.drop_replaced_checks();
+        let desired: Vec<String> = self.state.draft_checked.iter().cloned().collect();
+        let expected = self.state.draft_checked.identities();
+        if desired.is_empty() {
+            self.restore_settings_checklists(original_draft_checked, original_pending_checked);
+            self.share_save_failed(
+                "check at least one device before changing the active endpoint".to_string(),
+            );
+            return;
+        }
+        let Some(store) = self.settings_store.clone() else {
+            self.restore_settings_checklists(original_draft_checked, original_pending_checked);
+            self.share_save_failed("no settings file".to_string());
+            return;
+        };
+        let mut draft = self.state.draft.clone();
+        draft.share_address = draft.share_address.trim().to_string();
+        draft.share_port = bind.port;
+        let staged = match store.stage(&draft) {
+            Ok(staged) => staged,
+            Err(error) => {
+                self.restore_settings_checklists(original_draft_checked, original_pending_checked);
+                self.share_save_failed(error.to_string());
+                return;
+            }
+        };
+        let prepared = match self
+            .client
+            .prepare_share_rebind_expected(bind, desired, expected)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                store.discard(staged);
+                self.restore_settings_checklists(original_draft_checked, original_pending_checked);
+                self.share_save_failed(error.to_string());
+                return;
+            }
+        };
+        let publication = match store.publish_reversibly(staged) {
+            Ok(publication) => publication,
+            Err(error) => {
+                let _ = self.client.cancel_share_rebind(prepared.token);
+                self.restore_settings_checklists(original_draft_checked, original_pending_checked);
+                self.share_save_failed(error.to_string());
+                return;
+            }
+        };
+        let candidate_bind = prepared
+            .bound
+            .expect("the client API requires a bound replacement endpoint");
+        match self.client.commit_share_rebind(prepared.token.clone()) {
+            Ok(info) => {
+                publication.confirm();
+                self.state.draft = draft;
+                self.state.commit_share_draft();
+                self.state.sharing.pairing = Some(info);
+                self.sync_share_status();
+                self.state.info(
+                    "share endpoint changed; remote clients disconnected and new keys issued",
+                );
+            }
+            Err(error) => {
+                let uncertain = matches!(
+                    error,
+                    ClientError::Timeout(_) | ClientError::WriteUncertain(_)
+                );
+                let observed = if uncertain {
+                    self.client.sharing_status().ok()
+                } else {
+                    None
+                };
+                if let Some(snapshot) = observed.clone() {
+                    self.state.apply_sharing_snapshot(snapshot);
+                }
+                let active_bind = self
+                    .state
+                    .sharing
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.bind);
+                let committed_without_response = uncertain && active_bind == Some(candidate_bind);
+                let outcome_unknown = uncertain && observed.is_none();
+                let rollback = publication.rollback();
+                if committed_without_response || outcome_unknown {
+                    // The new session's one-time secrets were not received.
+                    // Fail closed rather than leave an active listener whose
+                    // credentials cannot be shown; preserve the draft and
+                    // restore the previous preferences where possible.
+                    let stop = self.client.stop_sharing();
+                    if stop.is_ok() {
+                        self.state.sharing.clear_session();
+                    } else {
+                        // If the core cannot be reached, do not keep showing
+                        // old one-time keys as if they still belonged to it.
+                        self.state.sharing.pairing = None;
+                    }
+                    self.restore_settings_checklists(
+                        original_draft_checked,
+                        original_pending_checked,
+                    );
+                    self.share_save_failed(format!(
+                        "endpoint handover outcome is unknown and its new keys were not received{}{}",
+                        if stop.is_ok() { "; sharing was stopped" } else { "; could not verify or stop sharing" },
+                        rollback.err().map(|error| format!("; settings rollback failed: {error}")).unwrap_or_default()
+                    ));
+                } else {
+                    let _ = self.client.cancel_share_rebind(prepared.token);
+                    self.restore_settings_checklists(
+                        original_draft_checked,
+                        original_pending_checked,
+                    );
+                    self.share_save_failed(format!(
+                        "endpoint handover failed; the previous share is unchanged{}: {error}",
+                        rollback
+                            .err()
+                            .map(|error| format!("; settings rollback failed: {error}"))
+                            .unwrap_or_default()
+                    ));
+                }
+            }
         }
     }
 

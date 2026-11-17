@@ -9,8 +9,8 @@ use serial_nexus_protocol::{
     decode_bytes, ClientKind, ControlReleaseReason, ControlState, DeviceStatus, DeviceSummary,
     ErrorBody, ErrorCode, Event, HelloParams, HelloResult, HistoryLine, Holder, OpenParams,
     OpenResult, ReadParams, ReadResult, Request, ResponseData, Role, ServerMessage,
-    ShareCommitParams, ShareDevicesParams, SharePrepared, ShareStartParams, Source, WriteParams,
-    WriteResult, MAX_SHARED_DEVICES, PROTOCOL_VERSION,
+    ShareCommitParams, ShareDevicesParams, SharePrepared, ShareRebindParams, ShareStartParams,
+    Source, WriteParams, WriteResult, MAX_SHARED_DEVICES, PROTOCOL_VERSION,
 };
 
 use crate::config::CoreConfig;
@@ -180,12 +180,21 @@ pub struct Engine {
     /// A checklist validated by SharePrepare, waiting for the owner to publish
     /// its preferences and then commit it.
     prepared_share: Mutex<Option<PreparedShare>>,
+    /// A bound replacement listener waiting for the owner's durable settings
+    /// publication and explicit commit. The old session remains live meanwhile.
+    prepared_rebind: Mutex<Option<PreparedRebind>>,
 }
 
 struct PreparedShare {
     owner: u64,
     token: String,
     identities: Vec<DeviceIdentity>,
+}
+
+struct PreparedRebind {
+    owner: u64,
+    token: String,
+    prepared: share::Prepared,
 }
 
 impl Engine {
@@ -215,6 +224,7 @@ impl Engine {
             detected_tokens: Mutex::new(HashMap::new()),
             next_engine_token: AtomicU64::new(1),
             prepared_share: Mutex::new(None),
+            prepared_rebind: Mutex::new(None),
         })
     }
 
@@ -426,6 +436,9 @@ impl Engine {
             Request::ShareReplace(params) => self.replace_shared_devices(client_id, params),
             Request::SharePrepare(params) => self.prepare_shared_devices(client_id, params),
             Request::ShareCommit(params) => self.commit_shared_devices(client_id, params),
+            Request::ShareRebindPrepare(params) => self.prepare_share_rebind(client_id, params),
+            Request::ShareRebindCommit(params) => self.commit_share_rebind(client_id, params),
+            Request::ShareRebindCancel(params) => self.cancel_share_rebind(client_id, params),
             Request::ShareUncheck(params) => self.uncheck_shared_devices(client_id, params),
             Request::ShareStatus => self.sharing_status(client_id),
         }
@@ -1736,11 +1749,12 @@ impl Engine {
     /// Stop sharing: close the listener, disconnect every remote client and
     /// revoke the session's credentials.
     pub fn stop_sharing(&self) {
-        *self.prepared_share.lock().expect("prepared share lock") = None;
         // Hold the gate while revoking and stopping: a remote write admitted
         // concurrently either queued before the bump (and is dropped) or waits
         // here and then sees the stopped session.
         let _gate = self.share_gate.write().expect("share gate");
+        *self.prepared_share.lock().expect("prepared share lock") = None;
+        *self.prepared_rebind.lock().expect("prepared rebind lock") = None;
         // Queued, not-yet-started remote writes must not run after sharing
         // stops; bump every device's remote generation before disconnecting.
         self.revoke_remote_writes();
@@ -1830,7 +1844,10 @@ impl Engine {
             token: token.clone(),
             identities,
         });
-        Ok(ResponseData::SharePrepared(SharePrepared { token }))
+        Ok(ResponseData::SharePrepared(SharePrepared {
+            token,
+            bound: None,
+        }))
     }
 
     fn commit_shared_devices(
@@ -1852,6 +1869,147 @@ impl Engine {
             ));
         };
         self.apply_shared_identities(&session, prepared.identities)
+    }
+
+    fn prepare_share_rebind(
+        &self,
+        client_id: u64,
+        params: ShareRebindParams,
+    ) -> Result<ResponseData, ErrorBody> {
+        // Serialize preparation against stop and commit so a candidate cannot
+        // be installed after the owning session has been revoked.
+        let _gate = self.share_gate.read().expect("share gate");
+        let active = self.active_owner_session(client_id)?;
+        if params.bind.socket_addr() == active.bind() {
+            return Err(ErrorBody::new(
+                ErrorCode::BadRequest,
+                "the replacement endpoint is unchanged",
+            ));
+        }
+        if params.devices.is_empty() {
+            return Err(ErrorBody::new(
+                ErrorCode::BadRequest,
+                "check at least one device before changing the active endpoint",
+            ));
+        }
+        let identities = self.validated_shared_identities(&params.devices, &params.expected)?;
+        if identities.is_empty() || identities.len() > MAX_SHARED_DEVICES {
+            return Err(ErrorBody::new(
+                ErrorCode::LimitExceeded,
+                format!("the replacement must share between one and {MAX_SHARED_DEVICES} devices"),
+            ));
+        }
+        // Binding and fresh key/certificate creation happen before settings
+        // publication or any mutation of the current session.
+        let share_params = ShareStartParams {
+            bind: params.bind,
+            devices: params.devices,
+            expected: params.expected,
+        };
+        let prepared = share::prepare(client_id, &share_params, identities, self.share_limits())
+            .map_err(|message| ErrorBody::new(ErrorCode::DeviceFailed, message))?;
+        let token = format!(
+            "rebind-{}",
+            self.next_engine_token.fetch_add(1, Ordering::SeqCst)
+        );
+        let bound = prepared.info.bind;
+        *self.prepared_rebind.lock().expect("prepared rebind lock") = Some(PreparedRebind {
+            owner: client_id,
+            token: token.clone(),
+            prepared,
+        });
+        Ok(ResponseData::SharePrepared(SharePrepared {
+            token,
+            bound: Some(bound),
+        }))
+    }
+
+    fn commit_share_rebind(
+        self: &Arc<Self>,
+        client_id: u64,
+        params: ShareCommitParams,
+    ) -> Result<ResponseData, ErrorBody> {
+        let dead = self.dead_connections.lock().expect("dead connections lock");
+        if dead.contains(&client_id) {
+            return Err(ErrorBody::new(
+                ErrorCode::BadRequest,
+                "the enabling terminal connection has closed",
+            ));
+        }
+        let kind = self.identity(client_id).0;
+        if kind != ClientKind::Human {
+            return Err(ErrorBody::new(
+                ErrorCode::PermissionDenied,
+                "only a local human terminal may change the sharing endpoint",
+            ));
+        }
+        let _gate = self.share_gate.write().expect("share gate");
+        let mut current = self.sharing.lock().expect("sharing lock");
+        let Some(old) = current.as_ref().cloned() else {
+            return Err(ErrorBody::new(ErrorCode::NotFound, "sharing is not active"));
+        };
+        if old.owner_client_id() != client_id || old.is_stopped() {
+            return Err(ErrorBody::new(
+                ErrorCode::PermissionDenied,
+                "only the local terminal owning the active share may replace it",
+            ));
+        }
+        let prepared = {
+            let mut slot = self.prepared_rebind.lock().expect("prepared rebind lock");
+            if !slot.as_ref().is_some_and(|prepared| {
+                prepared.owner == client_id && prepared.token == params.token
+            }) {
+                return Err(ErrorBody::new(
+                    ErrorCode::BadRequest,
+                    "the prepared replacement is no longer available; save again",
+                ));
+            }
+            slot.take().expect("checked prepared replacement")
+        };
+        // Ensure the listener worker exists before the old session is touched.
+        // It cannot accept until after the engine has switched sessions.
+        let activate =
+            share::spawn_listener_gated(Arc::clone(self), Arc::clone(&prepared.prepared.session))
+                .map_err(|error| {
+                ErrorBody::new(
+                    ErrorCode::Internal,
+                    format!("could not prepare the replacement listener: {error}"),
+                )
+            })?;
+
+        // From here there are no fallible preparation steps. Revoke queued old
+        // writes, shut down old remote clients, publish the new session, then
+        // release its accept loop so no peer can observe a half-installed ACL.
+        self.revoke_remote_writes();
+        old.stop();
+        self.clear_shared_instances();
+        let new_session = Arc::clone(&prepared.prepared.session);
+        *current = Some(Arc::clone(&new_session));
+        drop(current);
+        self.refresh_shared_instances(&new_session);
+        let _ = activate.send(());
+        drop(dead);
+        Ok(ResponseData::ShareStarted(prepared.prepared.info))
+    }
+
+    fn cancel_share_rebind(
+        &self,
+        client_id: u64,
+        params: ShareCommitParams,
+    ) -> Result<ResponseData, ErrorBody> {
+        self.owner_session(client_id)?;
+        let mut slot = self.prepared_rebind.lock().expect("prepared rebind lock");
+        if !slot
+            .as_ref()
+            .is_some_and(|prepared| prepared.owner == client_id && prepared.token == params.token)
+        {
+            return Err(ErrorBody::new(
+                ErrorCode::BadRequest,
+                "the prepared replacement is no longer available",
+            ));
+        }
+        slot.take();
+        Ok(ResponseData::Pong)
     }
 
     fn apply_shared_identities(
@@ -2150,6 +2308,9 @@ impl Engine {
             | Request::ShareReplace(_)
             | Request::SharePrepare(_)
             | Request::ShareCommit(_)
+            | Request::ShareRebindPrepare(_)
+            | Request::ShareRebindCommit(_)
+            | Request::ShareRebindCancel(_)
             | Request::ShareUncheck(_)
             | Request::ShareStatus => Err(ErrorBody::new(
                 ErrorCode::PermissionDenied,

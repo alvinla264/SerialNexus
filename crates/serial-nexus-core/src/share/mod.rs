@@ -612,6 +612,33 @@ impl SharingSession {
     }
 }
 
+/// Start an accept loop paused until the owning engine commits this prepared
+/// session. Spawning before the commit keeps thread-creation failure from
+/// destroying the old active listener.
+pub fn spawn_listener_gated(
+    engine: Arc<Engine>,
+    session: Arc<SharingSession>,
+) -> std::io::Result<crossbeam_channel::Sender<()>> {
+    let thread_session = Arc::clone(&session);
+    let (activate, ready) = crossbeam_channel::bounded(1);
+    thread::Builder::new()
+        .name("serial-nexus-share-listener".into())
+        .spawn(move || {
+            loop {
+                if thread_session.is_stopped() {
+                    return;
+                }
+                match ready.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            accept_loop(engine, thread_session);
+        })
+        .map(|_| activate)
+}
+
 /// Start the accept loop for a session. The thread ends when the session stops.
 pub fn spawn_listener(engine: Arc<Engine>, session: Arc<SharingSession>) -> std::io::Result<()> {
     let thread_session = Arc::clone(&session);

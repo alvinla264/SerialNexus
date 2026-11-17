@@ -168,15 +168,14 @@ LAN sharing and remote-client terms (the core contract is in
   Share button) with the address, port, device checklist and explicit Start and
   Stop buttons. Opening the page selects nothing on the network; Start with an
   unsaved draft asks `Save and start` or `Cancel`, and Stop asks for a second
-  confirmation. While active, a Save applies checklist edits only; changing
-  the address or port requires stopping first, so the running session and its
-  credentials are never silently replaced. While active it shows the bound
-  state and the two distinct
-  sharing keys; visible Copy buttons (`c`/`C` also) ask the terminal (OSC 52)
-  to copy the complete human or MCP/AI key, because selecting the hard-wrapped
-  rows would add line breaks; `v`/`V` show one key as a single soft-wrapped line
-  for a terminal that ignores clipboard escapes, refusing a pane too short for
-  the whole line rather than clipping it. `a` toggles the **older host fields**
+  confirmation. While active, checklist edits apply only on Save. A changed
+  address or port asks for a second confirmation; a prepared endpoint is bound
+  before the settings file is published, so a bind or persistence failure keeps
+  the old listener, long keys and remote clients active with the draft retained.
+  A successful handover disconnects old remote clients and issues fresh long
+  keys. The active state shows its bound address and distinct sharing keys;
+  visible Copy and Show key buttons ask for OSC 52 copying or display a key as
+  one soft-wrapped line when clipboard escapes are ignored. The **older host fields**
   (host name, fingerprint, CA certificate and the separate raw credentials) for
   a terminal that predates keys.
 - **Connect form**: the remote terminal's memory-only page for a host address,

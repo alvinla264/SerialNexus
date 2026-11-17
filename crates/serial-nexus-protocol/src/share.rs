@@ -217,6 +217,17 @@ pub struct ShareStartParams {
     pub expected: BTreeMap<String, String>,
 }
 
+/// Prepare a replacement listener while the current share remains live.
+/// The core binds and generates the new session before allowing commit, so a
+/// rejected endpoint leaves the old listener and credentials untouched.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRebindParams {
+    pub bind: ShareBind,
+    pub devices: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected: BTreeMap<String, String>,
+}
+
 /// Check or uncheck specific devices in the owner's running session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareDevicesParams {
@@ -226,13 +237,16 @@ pub struct ShareDevicesParams {
     pub expected: BTreeMap<String, String>,
 }
 
-/// A validated checklist that has not been applied yet.
+/// A prepared share change that has not been applied yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharePrepared {
     pub token: String,
+    /// Actual bound address for endpoint handovers (port zero may be assigned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<std::net::SocketAddr>,
 }
 
-/// Apply a previously prepared checklist.
+/// Apply a previously prepared checklist or endpoint change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareCommitParams {
     pub token: String,

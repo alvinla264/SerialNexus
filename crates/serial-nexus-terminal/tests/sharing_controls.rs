@@ -328,6 +328,86 @@ fn unchecking_while_sharing_revokes_the_remote_client_and_leaves_other_devices_a
 }
 
 #[test]
+fn a_confirmed_active_endpoint_handover_disconnects_old_remotes_and_rotates_keys() {
+    let (fixture, devices) = Fixture::new();
+    let mut app = fixture.app();
+    let path = devices[0].path.clone();
+    check_device(&mut app, &path);
+    set_bind(&mut app, "127.0.0.1", 0);
+    save(&mut app);
+    start(&mut app);
+    app.open_share();
+
+    let old_keys = pairing(&app);
+    let old_remote = RemoteClient::connect(&old_keys.0, &old_keys.1, None, Duration::from_secs(5))
+        .expect("the old key authenticates");
+    assert_eq!(
+        old_remote.list_devices().expect("old list").devices.len(),
+        1
+    );
+    let old_bind = app
+        .state
+        .sharing
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.bind)
+        .expect("old listener bound");
+    let new_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a free port")
+        .local_addr()
+        .expect("address")
+        .port();
+    app.state.draft.share_address = "127.0.0.2".into();
+    app.state.port_text = new_port.to_string();
+    let save_row = app
+        .state
+        .share_rows()
+        .iter()
+        .position(|row| *row == ShareRow::Save)
+        .expect("Save button");
+    app.state.share_row = save_row;
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
+    assert!(
+        old_remote.list_devices().is_ok(),
+        "confirmation leaves old peers live"
+    );
+
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert!(app.state.sharing.active);
+    assert_eq!(app.state.settings.share_port, new_port);
+    assert_eq!(app.state.settings.share_address, "127.0.0.2");
+    assert_eq!(
+        app.state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 2], new_port)))
+    );
+    assert_ne!(
+        pairing(&app),
+        old_keys,
+        "new session issues fresh long keys"
+    );
+    assert!(
+        old_remote.list_devices().is_err(),
+        "handover disconnects old peers"
+    );
+    let (new_host, new_human, _) = pairing(&app);
+    let new_remote = RemoteClient::connect(&new_host, &new_human, None, Duration::from_secs(5))
+        .expect("fresh key authenticates at replacement endpoint");
+    assert_eq!(
+        new_remote.list_devices().expect("new list").devices.len(),
+        1
+    );
+    assert_ne!(old_bind.port(), new_port);
+    assert!(!app.state.has_unsaved_share());
+    assert!(!fixture.settings_text().contains(&new_human.credential));
+    app.shutdown();
+}
+
+#[test]
 fn a_failed_settings_publish_does_not_detach_remote_sessions() {
     let (fixture, devices) = Fixture::new();
     let mut app = fixture.app();
@@ -1093,11 +1173,17 @@ fn active_share_edits_apply_only_on_save_and_cancel_keeps_the_effective_values()
     let mut app = fixture.app();
     let path = devices[0].path.clone();
     check_device(&mut app, &path);
-    set_bind(&mut app, "127.0.0.1", 7331);
+    set_bind(&mut app, "127.0.0.1", 0);
     save(&mut app);
     start(&mut app);
     app.open_share();
-    let effective = app.state.settings.share_port;
+    let effective = app
+        .state
+        .sharing
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.bind)
+        .expect("the original listener is bound");
 
     app.state.port_text = "7444".into();
     assert!(app.state.has_unsaved_share());
@@ -1109,10 +1195,15 @@ fn active_share_edits_apply_only_on_save_and_cancel_keeps_the_effective_values()
         .expect("a Cancel button");
     app.state.share_row = cancel;
     app.handle_key(serial_nexus_terminal::input::Key::Enter);
-    assert_eq!(app.state.settings.share_port, effective);
+    assert_eq!(app.state.settings.share_port, 0);
     assert!(!app.state.has_unsaved_share());
 
-    app.state.port_text = "7444".into();
+    let new_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a new endpoint")
+        .local_addr()
+        .expect("address")
+        .port();
+    app.state.port_text = new_port.to_string();
     let save_row = app
         .state
         .share_rows()
@@ -1120,21 +1211,45 @@ fn active_share_edits_apply_only_on_save_and_cancel_keeps_the_effective_values()
         .position(|row| *row == ShareRow::Save)
         .expect("a Save button");
     app.state.share_row = save_row;
+    let old_keys = pairing(&app);
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
+    assert_eq!(
+        app.state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind),
+        Some(effective),
+        "the first Save asks and leaves the old session untouched"
+    );
+    assert_eq!(pairing(&app), old_keys);
+    app.handle_key(serial_nexus_terminal::input::Key::Esc);
+    assert_eq!(app.state.share_confirm, None);
+    assert_eq!(app.state.settings.share_port, 0);
+    assert_eq!(pairing(&app), old_keys);
+    assert!(
+        app.state.has_unsaved_share(),
+        "Cancel keeps the editable draft"
+    );
+
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
     app.handle_key(serial_nexus_terminal::input::Key::Enter);
     assert!(app.state.sharing.active);
+    assert_eq!(app.state.settings.share_port, new_port);
+    assert!(!app.state.has_unsaved_share());
     assert_eq!(
-        app.state.settings.share_port, effective,
-        "an active endpoint change is refused until Stop"
-    );
-    assert!(app.state.has_unsaved_share(), "the draft is kept");
-    assert!(
         app.state
-            .share_error
-            .as_deref()
-            .is_some_and(|error| error.contains("stop sharing")),
-        "{:?}",
-        app.state.share_error
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind)
+            .map(|bind| bind.port()),
+        Some(new_port),
+        "confirmed Save activates the new listener"
     );
+    assert_ne!(pairing(&app), old_keys, "handover rotates long keys");
     app.shutdown();
 }
 
@@ -1186,7 +1301,15 @@ fn a_failed_active_endpoint_change_keeps_the_previous_listener_and_draft() {
         .as_ref()
         .and_then(|snapshot| snapshot.bind)
         .expect("the old listener is bound");
+    let old_keys = pairing(&app);
+    let remote = RemoteClient::connect(&old_keys.0, &old_keys.1, None, Duration::from_secs(5))
+        .expect("remote authenticates before handover");
+    let remote_device = remote
+        .open(&path, Some(9_600), false)
+        .expect("remote opens checked device");
 
+    // The destination address/port is already occupied by another listener.
+    // Candidate preparation must fail without dropping the old session.
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
     let occupied_port = occupied.local_addr().expect("addr").port();
     app.state.port_text = occupied_port.to_string();
@@ -1197,6 +1320,8 @@ fn a_failed_active_endpoint_change_keeps_the_previous_listener_and_draft() {
         .position(|row| *row == ShareRow::Save)
         .expect("Save is shown");
     app.state.share_row = save_row;
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
     app.handle_key(serial_nexus_terminal::input::Key::Enter);
 
     assert!(
@@ -1217,6 +1342,15 @@ fn a_failed_active_endpoint_change_keeps_the_previous_listener_and_draft() {
         "preferences did not change"
     );
     assert_eq!(app.state.port_text, occupied_port.to_string());
+    assert_eq!(
+        pairing(&app),
+        old_keys,
+        "failed bind preserves the old keys"
+    );
+    assert!(
+        remote.status(remote_device.device_id).is_ok(),
+        "failed candidate binding preserves existing remote clients"
+    );
     assert!(
         app.state.has_unsaved_share(),
         "the draft is kept for correction"
@@ -1225,10 +1359,82 @@ fn a_failed_active_endpoint_change_keeps_the_previous_listener_and_draft() {
         app.state
             .share_error
             .as_deref()
-            .is_some_and(|error| error.contains("stop sharing")),
+            .is_some_and(|error| error.contains("could not bind")),
         "{:?}",
         app.state.share_error
     );
+    app.shutdown();
+}
+
+#[test]
+fn a_failed_active_rebind_settings_publish_keeps_old_session_keys_and_remotes() {
+    let (fixture, devices) = Fixture::new();
+    let mut app = fixture.app();
+    let path = devices[0].path.clone();
+    check_device(&mut app, &path);
+    set_bind(&mut app, "127.0.0.1", 0);
+    save(&mut app);
+    start(&mut app);
+    app.open_share();
+    let old_keys = pairing(&app);
+    let remote = RemoteClient::connect(&old_keys.0, &old_keys.1, None, Duration::from_secs(5))
+        .expect("remote authenticates");
+    let old_bind = app
+        .state
+        .sharing
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.bind)
+        .expect("old listener bound");
+    let new_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a free port")
+        .local_addr()
+        .expect("address")
+        .port();
+    app.state.port_text = new_port.to_string();
+    std::fs::remove_file(&fixture.settings_path).expect("remove settings file");
+    std::fs::create_dir(&fixture.settings_path).expect("make publish fail after staging");
+    let save_row = app
+        .state
+        .share_rows()
+        .iter()
+        .position(|row| *row == ShareRow::Save)
+        .expect("Save");
+    app.state.share_row = save_row;
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
+
+    assert!(app.state.sharing.active);
+    assert_eq!(
+        app.state
+            .sharing
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.bind),
+        Some(old_bind)
+    );
+    assert_eq!(pairing(&app), old_keys);
+    assert!(
+        remote.list_devices().is_ok(),
+        "old clients survive a persistence failure"
+    );
+    assert!(
+        app.state.has_unsaved_share(),
+        "the failed endpoint draft remains editable"
+    );
+    assert!(
+        app.state
+            .share_error
+            .as_deref()
+            .is_some_and(|message| message.contains("directory")),
+        "{:?}",
+        app.state.share_error
+    );
+    let released = std::net::TcpListener::bind(("127.0.0.1", new_port))
+        .expect("cancel releases the prepared candidate listener");
+    drop(released);
+    std::fs::remove_dir(&fixture.settings_path).expect("remove forced failure directory");
     app.shutdown();
 }
 
@@ -1317,6 +1523,8 @@ fn an_empty_checklist_cannot_destroy_the_running_share() {
         .expect("Save is shown");
     app.state.share_row = save_row;
     app.handle_key(serial_nexus_terminal::input::Key::Enter);
+    assert_eq!(app.state.share_confirm, Some(ShareConfirm::Rebind));
+    app.handle_key(serial_nexus_terminal::input::Key::Enter);
 
     assert!(
         app.state.sharing.active,
@@ -1339,7 +1547,7 @@ fn an_empty_checklist_cannot_destroy_the_running_share() {
         app.state
             .share_error
             .as_deref()
-            .is_some_and(|error| error.contains("stop sharing")),
+            .is_some_and(|error| error.contains("at least one device")),
         "{:?}",
         app.state.share_error
     );

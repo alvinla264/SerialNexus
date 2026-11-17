@@ -432,10 +432,13 @@ activated.
    sharing stays off. Once on, the page shows the bound state and the keys.
 
 While sharing is active, checklist edits apply only on an explicit `[ Save ]`;
-`[ Cancel ]` leaves the running share unchanged. The address and port cannot be
-moved under a running listener without reissuing its credentials, so a Save
-that changes them is refused with the running share untouched: stop sharing
-first, then edit and Start the new endpoint.
+`[ Cancel ]` leaves the effective share unchanged and discards the draft. A
+changed address or port requires a second confirmation: the terminal first
+binds and prepares the replacement while the old listener, keys and remote
+clients remain live, then publishes settings and commits the handover. A
+successful handover disconnects every old remote client and issues fresh long
+keys. If binding/preparation or settings publication fails, the old listener,
+keys and clients remain active and the draft stays available to correct.
 
 The Share page normally shows the bound address
 and two clearly labelled, distinct **sharing keys**: a human terminal key and an

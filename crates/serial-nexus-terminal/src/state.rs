@@ -109,6 +109,8 @@ pub enum ShareConfirm {
     Start,
     /// Stop the running session and disconnect every remote client.
     Stop,
+    /// Replace the active listener after warning about remote disconnects/key rotation.
+    Rebind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1390,6 +1392,7 @@ impl AppState {
         text.clear();
         self.share_editing = true;
         self.share_error = None;
+        self.share_confirm = None;
         true
     }
 
@@ -1397,6 +1400,7 @@ impl AppState {
         if !self.share_editing || !ch.is_ascii_graphic() {
             return;
         }
+        self.share_confirm = None;
         if let Some((text, limit)) = match self.selected_share_row() {
             ShareRow::Address => Some((&mut self.draft.share_address, 64)),
             ShareRow::Port => Some((&mut self.port_text, 5)),
@@ -1416,6 +1420,7 @@ impl AppState {
         if !self.share_editing {
             return;
         }
+        self.share_confirm = None;
         let value: String = text
             .trim()
             .chars()
@@ -1436,6 +1441,7 @@ impl AppState {
         if !self.share_editing {
             return;
         }
+        self.share_confirm = None;
         if let Some(text) = match self.selected_share_row() {
             ShareRow::Address => Some(&mut self.draft.share_address),
             ShareRow::Port => Some(&mut self.port_text),
@@ -1457,6 +1463,7 @@ impl AppState {
         };
         let device = self.devices.get(index)?;
         let path = device.path.clone();
+        self.share_confirm = None;
         let checked = if self.draft_checked.remove(&path) {
             false
         } else {
