@@ -6,6 +6,7 @@ members = [
     "crates/serial-nexus-core",
     "crates/serial-nexus-mcp",
     "crates/serial-nexus-terminal",
+    "crates/serial-nexus-lan-gate",
 ]
 
 [workspace.package]

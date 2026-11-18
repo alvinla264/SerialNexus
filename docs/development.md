@@ -189,3 +189,12 @@ loopback). Local serial I/O has also been checked manually on an STM32 Nucleo
 board, but the sharing path between two physical computers has not been
 verified. PTY fixtures are not enumerated, so sharing tests open them locally
 first; real enumerated devices need not be open locally.
+
+The opt-in [Docker LAN gate](lan-docker.md) closes the loopback gap: it runs a
+real host terminal and core beside real remote clients (the production remote
+adapter and the real MCP server) in two separate containers on a private
+internal bridge network, with a container-local PTY device published through
+production's `/dev/serial/by-id` discovery. It is not part of CI:
+`sh scripts/lan-docker/run.sh`. It still does not exercise a real firewall, a
+real LAN or USB serial hardware; the [board gate](board-gate.md) remains the
+real-hardware acceptance procedure.

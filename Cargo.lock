@@ -689,6 +689,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial-nexus-lan-gate"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "serial-nexus-client",
+ "serial-nexus-protocol",
+ "tempfile",
+ "unicode-width 0.2.0",
+ "vt100",
+]
+
+[[package]]
 name = "serial-nexus-mcp"
 version = "0.1.0"
 dependencies = [
