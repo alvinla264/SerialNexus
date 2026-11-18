@@ -964,6 +964,15 @@ impl Engine {
         client_id: u64,
         params: WriteParams,
     ) -> Result<WriteStart, ErrorBody> {
+        self.begin_write_with_share_gate(client_id, params, false)
+    }
+
+    fn begin_write_with_share_gate(
+        &self,
+        client_id: u64,
+        params: WriteParams,
+        share_gate_held: bool,
+    ) -> Result<WriteStart, ErrorBody> {
         let (kind, _name) = self.identity(client_id);
         let data = decode_bytes(&params.data_b64)
             .map_err(|error| ErrorBody::new(ErrorCode::BadRequest, error.to_string()))?;
@@ -1085,7 +1094,7 @@ impl Engine {
         let device_id = params.device_id;
         let event = Event::write(device_id, source, &data);
         drop(state);
-        self.emit(vec![event]);
+        self.emit_with_share_gate(vec![event], share_gate_held);
 
         match pending {
             None => Ok(WriteStart::Done(WriteResult {
@@ -2363,7 +2372,7 @@ impl Engine {
             let _ = error;
             return Err(Self::remote_denied());
         }
-        self.begin_write(client_id, params)
+        self.begin_write_with_share_gate(client_id, params, true)
     }
 
     fn revoke_path_everywhere(

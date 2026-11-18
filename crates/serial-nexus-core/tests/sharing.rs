@@ -593,6 +593,41 @@ fn connection_limits_refuse_new_peers_without_disturbing_existing_ones() {
 }
 
 #[test]
+fn stopping_sharing_during_remote_write_events_completes_revocation() {
+    let core = shared_core();
+    let owner = local_owner(&core);
+    let device = SimulatedDevice::new();
+    owner
+        .open(&device.path, Some(115_200), false)
+        .expect("open device");
+    let info = owner
+        .start_sharing(localhost_bind(), vec![device.path.clone()])
+        .expect("start sharing");
+    let remote = remote(&info, PairingRole::Human, "writer").expect("pair");
+    let opened = remote
+        .open(&device.path, None, false)
+        .expect("open remotely");
+    let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal writer");
+        for _ in 0..100 {
+            if remote.write_bytes(opened.device_id, b"x", None).is_err() {
+                break;
+            }
+        }
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("writer started");
+
+    owner
+        .stop_sharing()
+        .expect("revocation completes during writes");
+    writer.join().expect("writer thread");
+    assert!(!owner.sharing_status().expect("status").active);
+}
+
+#[test]
 fn stopping_sharing_during_a_waited_write_fails_it_without_replaying() {
     let core = shared_core();
     let owner = local_owner(&core);
