@@ -1455,6 +1455,8 @@ pub enum ConnectHit {
     ToggleMode,
 }
 
+const CONNECT_ACTIONS_ROW: &str = "[ Connect ]  [ Clear key ]  [ Cancel ]  [ Older fields ]";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ConnectLayout {
     title: Rect,
@@ -1473,7 +1475,7 @@ fn connect_layout(state: &AppState, right: Rect) -> Option<ConnectLayout> {
     // The action bar never clips a control: one row when it fits, then two,
     // then one full-width row per button on a genuinely narrow pane.
     let bar_height = if right.height >= 5 {
-        let rows = if right.width >= 48 {
+        let rows = if right.width >= CONNECT_ACTIONS_ROW.len() as u16 {
             1
         } else if right.width >= 38 {
             2
@@ -1646,7 +1648,7 @@ fn draw_connect(state: &AppState, buffer: &mut Buffer, area: Rect) -> Option<(u1
     }
     if layout.bar.height > 0 {
         let rows: &[&str] = match layout.bar.height {
-            1 => &["[ Connect ]  [ Clear key ]  [ Cancel ]  [ Older fields ]"],
+            1 => &[CONNECT_ACTIONS_ROW],
             2 => &["[ Connect ]  [ Clear key ]  [ Cancel ]", "[ Older fields ]"],
             _ => &[
                 "[ Connect ]",
@@ -3095,6 +3097,22 @@ mod tests {
         assert_eq!(
             connect_hit_test(&state, panes(area).right, column, row),
             Some(ConnectHit::ToggleMode)
+        );
+    }
+
+    #[test]
+    fn an_81_column_connect_page_does_not_clip_the_single_row_action_bar() {
+        let mut state = demo();
+        state.connect = Some(ConnectForm::new());
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+        let text = screen(&state, 80, 24).join("\n");
+        assert!(text.contains("[ Older fields ]"), "{text}");
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.contains("[ Older ") && !line.contains("[ Older fields ]")),
+            "the label is not clipped:\n{text}"
         );
     }
 
