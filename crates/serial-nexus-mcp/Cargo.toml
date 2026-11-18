@@ -17,11 +17,9 @@ path = "src/lib.rs"
 [dependencies]
 serial-nexus-protocol = { path = "../serial-nexus-protocol" }
 serial-nexus-client = { path = "../serial-nexus-client" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 serial-nexus-core = { path = "../serial-nexus-core" }
-serial-nexus-client = { path = "../serial-nexus-client" }
 tempfile = "3"
 nix = { workspace = true }
