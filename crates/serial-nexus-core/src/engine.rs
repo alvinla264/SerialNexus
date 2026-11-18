@@ -2061,7 +2061,7 @@ impl Engine {
                     &identity.canonical,
                     &session,
                     false,
-                    false,
+                    true,
                 ));
             }
         }
@@ -2389,6 +2389,23 @@ impl Engine {
         revalidate_instances: bool,
         share_gate_held: bool,
     ) -> Vec<u64> {
+        if share_gate_held {
+            self.revoke_path_everywhere_under_gate(path, session, revalidate_instances)
+        } else {
+            let _gate = self.share_gate.read().expect("share gate");
+            self.revoke_path_everywhere_under_gate(path, session, revalidate_instances)
+        }
+    }
+
+    fn revoke_path_everywhere_under_gate(
+        &self,
+        path: &str,
+        session: &SharingSession,
+        revalidate_instances: bool,
+    ) -> Vec<u64> {
+        if session.is_stopped() {
+            return Vec::new();
+        }
         let ids: Vec<u64> = self
             .state
             .lock()
@@ -2400,11 +2417,7 @@ impl Engine {
             .collect();
         if revalidate_instances {
             for id in &ids {
-                if share_gate_held {
-                    self.revalidate_shared_instance_under_gate(*id, session);
-                } else {
-                    self.revalidate_shared_instance(*id, session);
-                }
+                self.revalidate_shared_instance_under_gate(*id, session);
             }
         } else {
             let mut state = self.state.lock().expect("state lock");
@@ -3073,7 +3086,18 @@ mod identity_tests {
         );
 
         old.stop();
+        let path = engine.state.lock().expect("state lock").devices[&1]
+            .path
+            .clone();
+        let epoch = Arc::new(AtomicU64::new(7));
+        engine
+            .live_writes
+            .lock()
+            .expect("live writes lock")
+            .insert(1, (path.clone(), Arc::clone(&epoch)));
+        engine.revoke_path_everywhere(&path, &old, true, false);
         engine.detach_remote_clients(&[1], &old, "stale request");
+        assert_eq!(epoch.load(Ordering::SeqCst), 7);
 
         let state = engine.state.lock().expect("state lock");
         assert!(
