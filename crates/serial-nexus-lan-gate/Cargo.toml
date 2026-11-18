@@ -1,0 +1,25 @@
+[package]
+name = "serial-nexus-lan-gate"
+description = "Opt-in Docker LAN gate: drives the real SerialNexus host and remote clients across two containers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "serial-nexus-lan-gate"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serial-nexus-client = { path = "../serial-nexus-client" }
+serial-nexus-protocol = { path = "../serial-nexus-protocol" }
+unicode-width.workspace = true
+vt100 = "0.15"
+
+[dev-dependencies]
+tempfile = "3"
