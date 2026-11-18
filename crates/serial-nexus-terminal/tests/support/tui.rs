@@ -31,6 +31,7 @@ pub const KEY_TAB: &[u8] = b"\t";
 pub const KEY_UP: &[u8] = b"\x1b[A";
 pub const KEY_DOWN: &[u8] = b"\x1b[B";
 pub const KEY_PAGE_UP: &[u8] = b"\x1b[5~";
+pub const KEY_PAGE_DOWN: &[u8] = b"\x1b[6~";
 pub const KEY_CTRL_Q: &[u8] = &[0x11];
 pub const KEY_CTRL_S: &[u8] = &[0x13];
 /// What a terminal without the enhanced keyboard protocol sends for `Ctrl+]`.

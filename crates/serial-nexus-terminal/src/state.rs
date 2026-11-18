@@ -3,7 +3,8 @@
 //! This module has no terminal or socket code, so the interesting behaviour
 //! (switching, filtering human writes, unplug notices) is testable on its own.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use serial_nexus_protocol::{
     Event, Holder, ShareSessionInfo, SharingSnapshot, Source, DEFAULT_BAUD,
@@ -27,6 +28,8 @@ pub enum SidebarButton {
     Share,
     /// Pair with a remote host and connect to it.
     Connect,
+    /// Dismiss the visible serious warning. Only shown while one is pending.
+    Dismiss,
     /// Open the settings in the right pane.
     Settings,
 }
@@ -40,7 +43,7 @@ pub enum View {
     Scrollback,
     /// The owner's pairing information for the running sharing session. The
     /// secrets in it exist only in memory and are drawn only here.
-    Pairing,
+    Share,
     /// The form that asks for a remote host's address, port and sharing key.
     Connect,
     /// The form that writes one endpoint's MCP/AI pairing into the private
@@ -81,17 +84,55 @@ impl SettingsRow {
     }
 }
 
+/// One row of the owner's Share page. The address, port and device checks are
+/// editable; the rest are explicit buttons. No row starts, stops or connects
+/// until the human activates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareRow {
+    Address,
+    Port,
+    Device(usize),
+    StartStop,
+    Save,
+    Cancel,
+    CopyHuman,
+    CopyAi,
+    ShowHuman,
+    ShowAi,
+    Advanced,
+}
+
+/// A Share-page action waiting for the human's confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareConfirm {
+    /// Start, after saving the edited address, port or device selection.
+    Start,
+    /// Stop the running session and disconnect every remote client.
+    Stop,
+    /// Replace the active listener after warning about remote disconnects/key rotation.
+    Rebind,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
     Info,
     Error,
 }
 
+/// How long an ordinary notice stays on screen without being replaced.
+pub const NOTICE_TTL: Duration = Duration::from_secs(6);
+
 /// A message shown outside the device stream (errors, unplug, hints).
+///
+/// Ordinary notices are transient: they clear themselves after
+/// [`NOTICE_TTL`]. A serious warning (`sticky`) stays until the human
+/// dismisses it from the sidebar, even while ordinary notices arrive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub text: String,
     pub severity: Severity,
+    /// Kept until explicitly dismissed instead of expiring.
+    pub sticky: bool,
 }
 
 impl Notice {
@@ -99,6 +140,7 @@ impl Notice {
         Self {
             text: text.into(),
             severity: Severity::Info,
+            sticky: false,
         }
     }
 
@@ -106,7 +148,22 @@ impl Notice {
         Self {
             text: text.into(),
             severity: Severity::Error,
+            sticky: false,
         }
+    }
+
+    /// A serious warning that must not be lost, overwritten by an ordinary
+    /// notice, or auto-dismissed. The human dismisses it from the sidebar.
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            severity: Severity::Error,
+            sticky: true,
+        }
+    }
+
+    pub fn is_sticky(&self) -> bool {
+        self.sticky
     }
 }
 
@@ -499,6 +556,14 @@ impl ConnectForm {
         self.error = None;
     }
 
+    /// Clear the complete human sharing key without touching the address or
+    /// port. The next submission is refused until a whole key is pasted.
+    pub fn clear_key(&mut self) {
+        self.key.clear();
+        self.key_invalid = false;
+        self.error = None;
+    }
+
     pub fn next_field(&mut self, delta: i32) {
         let fields = self.fields();
         let index = fields
@@ -832,12 +897,22 @@ pub struct AppState {
     /// The session shown in the right pane, if any.
     shown: Option<SessionKey>,
     pub notice: Option<Notice>,
+    /// Serious warnings not yet shown, oldest first. The visible warning is in
+    /// `notice`; these appear one at a time as each is dismissed.
+    queued_warnings: VecDeque<Notice>,
+    /// When the visible ordinary notice expires; `None` for a warning.
+    notice_expires: Option<Instant>,
+    /// An ordinary notice that arrived while a warning was visible. It is
+    /// shown after the warning is dismissed, if it has not expired by then.
+    deferred_notice: Option<(Notice, Instant)>,
     pub prompt: Option<BaudPrompt>,
     pub quit: bool,
     /// The sidebar button that has the highlight, when no device row does.
     pub selected_button: Option<SidebarButton>,
     /// Whether the sharing address or port row is taking typed text.
     pub settings_editing: bool,
+    /// Whether the next Settings Save must confirm active endpoint handover.
+    pub settings_rebind_confirm: bool,
     /// The port as typed, so a half-entered value survives until Save.
     pub port_text: String,
     /// Selected row of the settings view.
@@ -860,8 +935,17 @@ pub struct AppState {
     pub connect: Option<ConnectForm>,
     /// The MCP/AI pairing form while it is open.
     pub mcp_pair: Option<McpPairForm>,
-    /// Whether the pairing view lists the older host fields as well.
+    /// Whether the Share page lists the older host fields as well.
     pub pairing_advanced: bool,
+    /// Selected row of the Share page.
+    pub share_row: usize,
+    /// Whether the Share page's address or port row is taking typed text.
+    pub share_editing: bool,
+    /// In-form validation or action failure on the Share page. It is not a
+    /// footer notification and is never hidden by one.
+    pub share_error: Option<String>,
+    /// A Share-page action that needs one more explicit activation.
+    pub share_confirm: Option<ShareConfirm>,
     /// A key the owner asked to copy, as one unchanged string. Taken by the
     /// event loop, which asks the terminal to put it on the clipboard with
     /// OSC 52; nothing here touches the settings file or a device.
@@ -891,9 +975,13 @@ impl AppState {
             sessions: BTreeMap::new(),
             shown: None,
             notice: None,
+            queued_warnings: VecDeque::new(),
+            notice_expires: None,
+            deferred_notice: None,
             prompt: None,
             quit: false,
             settings_editing: false,
+            settings_rebind_confirm: false,
             port_text: String::new(),
             settings_row: 0,
             pairing_scroll: 0,
@@ -905,11 +993,137 @@ impl AppState {
             connect: None,
             mcp_pair: None,
             pairing_advanced: false,
+            share_row: 0,
+            share_editing: false,
+            share_error: None,
+            share_confirm: None,
             clipboard_copy: None,
             show_key: None,
             rows: rows.max(1),
             cols: cols.max(1),
         }
+    }
+
+    /// Show an ordinary notice now. It expires after [`NOTICE_TTL`], unless a
+    /// serious warning is visible: then it waits behind the warning instead of
+    /// replacing it.
+    pub fn set_notice(&mut self, notice: Notice) {
+        self.set_notice_at(notice, Instant::now());
+    }
+
+    pub fn set_notice_at(&mut self, notice: Notice, now: Instant) {
+        if notice.sticky {
+            if self.notice.as_ref().is_some_and(|current| current.sticky) {
+                self.queued_warnings.push_back(notice);
+            } else {
+                self.notice = Some(notice);
+                self.notice_expires = None;
+                self.focus_compact_warning();
+            }
+        } else if self.notice.as_ref().is_some_and(|current| current.sticky) {
+            self.deferred_notice = Some((notice, now + NOTICE_TTL));
+        } else {
+            self.deferred_notice = None;
+            self.notice = Some(notice);
+            self.notice_expires = Some(now + NOTICE_TTL);
+        }
+    }
+
+    pub fn info(&mut self, text: impl Into<String>) {
+        self.set_notice(Notice::info(text));
+    }
+
+    pub fn error(&mut self, text: impl Into<String>) {
+        self.set_notice(Notice::error(text));
+    }
+
+    pub fn warning(&mut self, text: impl Into<String>) {
+        self.set_notice(Notice::warning(text));
+    }
+
+    /// On a sidebar too short to show a device row and the warning's Dismiss
+    /// row separately, the label covers the device list. Move the keyboard
+    /// highlight to the visible Dismiss control so Enter does what the screen
+    /// says.
+    fn focus_compact_warning(&mut self) {
+        if self.selected_button.is_none()
+            && crate::render::short_warning_shares_list(self.rows, self.cols)
+            && self.sidebar_buttons().contains(&SidebarButton::Dismiss)
+        {
+            self.selected_button = Some(SidebarButton::Dismiss);
+        }
+    }
+
+    /// Drop an ordinary notice, as a successful corrective action does. A
+    /// serious warning is never cleared this way.
+    pub fn clear_ordinary_notice(&mut self) {
+        self.deferred_notice = None;
+        if self.notice.as_ref().is_some_and(|current| !current.sticky) {
+            self.notice = None;
+            self.notice_expires = None;
+        }
+    }
+
+    /// Expire an ordinary notice once its six seconds are up. Warnings stay.
+    pub fn expire_notices(&mut self, now: Instant) {
+        if let Some(expires) = self.notice_expires {
+            if expires <= now && self.notice.as_ref().is_some_and(|current| !current.sticky) {
+                self.notice = None;
+                self.notice_expires = None;
+            }
+        }
+        if self
+            .deferred_notice
+            .as_ref()
+            .is_some_and(|(_, expires)| *expires <= now)
+        {
+            self.deferred_notice = None;
+        }
+        if self.notice.is_none() {
+            if let Some((notice, expires)) = self.deferred_notice.take() {
+                if expires > now {
+                    self.notice = Some(notice);
+                    self.notice_expires = Some(expires);
+                }
+            }
+        }
+    }
+
+    /// Whether the visible notice is a warning that must be dismissed.
+    pub fn has_warning(&self) -> bool {
+        self.notice.as_ref().is_some_and(|notice| notice.sticky) || !self.queued_warnings.is_empty()
+    }
+
+    /// How many serious warnings remain, including the visible one.
+    pub fn warning_count(&self) -> usize {
+        usize::from(self.notice.as_ref().is_some_and(|notice| notice.sticky))
+            + self.queued_warnings.len()
+    }
+
+    /// The visible warning's one-based position among the remaining warnings.
+    pub fn warning_position(&self) -> Option<(usize, usize)> {
+        if !self.notice.as_ref().is_some_and(|notice| notice.sticky) {
+            return None;
+        }
+        let total = self.warning_count();
+        Some((total - self.queued_warnings.len(), total))
+    }
+
+    /// Dismiss the visible serious warning, making the next one (or a waiting
+    /// ordinary notice) visible. Returns whether there was one to dismiss.
+    pub fn dismiss_warning(&mut self) -> bool {
+        if !self.notice.as_ref().is_some_and(|notice| notice.sticky) {
+            return false;
+        }
+        self.notice = self.queued_warnings.pop_front();
+        self.notice_expires = None;
+        if self.notice.is_none() {
+            if let Some((notice, _)) = self.deferred_notice.take() {
+                self.notice = Some(notice);
+                self.notice_expires = Some(Instant::now() + NOTICE_TTL);
+            }
+        }
+        true
     }
 
     /// What one settings row edits. The first four rows are fixed; the rest
@@ -991,6 +1205,7 @@ impl AppState {
 
     /// Move the settings selection, staying on a real row.
     pub fn move_settings_row(&mut self, delta: i32) {
+        self.settings_rebind_confirm = false;
         let last = self.settings_row_count().saturating_sub(1);
         self.settings_row = (self.settings_row as i32 + delta).clamp(0, last as i32) as usize;
         self.settings_editing = false;
@@ -999,6 +1214,7 @@ impl AppState {
     /// Flip the selected flag or device checkbox in the draft. Text rows are
     /// edited by typing, never toggled, and return `None`.
     pub fn toggle_draft(&mut self) -> Option<bool> {
+        self.settings_rebind_confirm = false;
         match self.settings_kind(self.settings_row)? {
             SettingsRow::LocalEcho => {
                 self.draft.local_echo = !self.draft.local_echo;
@@ -1017,7 +1233,7 @@ impl AppState {
                     // Without a captured identity the core could only match a
                     // path, so a replacement could inherit this check.
                     let Some(identity) = device.identity.clone() else {
-                        self.notice = Some(Notice::error(
+                        self.set_notice(Notice::error(
                             "this device has no captured identity; refresh and try again",
                         ));
                         return Some(false);
@@ -1041,6 +1257,7 @@ impl AppState {
 
     /// Start typing into the selected address or port row.
     pub fn begin_settings_edit(&mut self) -> bool {
+        self.settings_rebind_confirm = false;
         let Some((text, _)) = self.selected_settings_text_mut() else {
             return false;
         };
@@ -1052,6 +1269,7 @@ impl AppState {
 
     /// Add one typed character to the selected text row.
     pub fn settings_edit_push(&mut self, ch: char) {
+        self.settings_rebind_confirm = false;
         if !self.settings_editing || !ch.is_ascii_graphic() {
             return;
         }
@@ -1063,6 +1281,7 @@ impl AppState {
     }
 
     pub fn settings_edit_backspace(&mut self) {
+        self.settings_rebind_confirm = false;
         if self.settings_editing {
             if let Some((text, _)) = self.selected_settings_text_mut() {
                 text.pop();
@@ -1103,8 +1322,11 @@ impl AppState {
         self.port_text = self.draft.share_port.to_string();
         self.settings_row = 0;
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.view = View::Settings;
-        self.notice = None;
+        // A serious warning is the human's to dismiss, not this page's to
+        // erase. An ordinary notice may give way to the new view.
+        self.clear_ordinary_notice();
     }
 
     /// Leave the settings without keeping the draft.
@@ -1113,6 +1335,7 @@ impl AppState {
         self.draft_checked = self.sharing.pending_checked.clone();
         self.port_text = self.draft.share_port.to_string();
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.leave_settings();
     }
 
@@ -1124,8 +1347,205 @@ impl AppState {
         self.port_text = self.settings.share_port.to_string();
         self.sharing.pending_checked = self.draft_checked.clone();
         self.settings_editing = false;
+        self.settings_rebind_confirm = false;
         self.apply_scrollback();
         self.leave_settings();
+    }
+
+    /// The rows the Share page draws, in order: the address and port, one
+    /// checkbox per local device, then the explicit buttons.
+    pub fn share_rows(&self) -> Vec<ShareRow> {
+        let mut rows = vec![ShareRow::Address, ShareRow::Port];
+        rows.extend(
+            self.local_device_indices()
+                .into_iter()
+                .map(ShareRow::Device),
+        );
+        rows.push(ShareRow::StartStop);
+        if self.has_unsaved_share() {
+            rows.push(ShareRow::Save);
+        }
+        if self.has_unsaved_share() || self.share_confirm.is_some() {
+            rows.push(ShareRow::Cancel);
+        }
+        if self.sharing.active {
+            rows.push(ShareRow::CopyHuman);
+            rows.push(ShareRow::CopyAi);
+            rows.push(ShareRow::ShowHuman);
+            rows.push(ShareRow::ShowAi);
+            rows.push(ShareRow::Advanced);
+        }
+        rows
+    }
+
+    /// The Share row the selection is on, clamped to the rows that exist now.
+    pub fn selected_share_row(&self) -> ShareRow {
+        let rows = self.share_rows();
+        rows.get(self.share_row.min(rows.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(ShareRow::Address)
+    }
+
+    pub fn move_share_row(&mut self, delta: i32) {
+        let rows = self.share_rows();
+        let last = rows.len().saturating_sub(1) as i32;
+        self.share_row = (self.share_row as i32 + delta).clamp(0, last) as usize;
+        self.share_editing = false;
+    }
+
+    /// Start typing into the selected Share address or port row.
+    pub fn begin_share_edit(&mut self) -> bool {
+        let (text, _) = match self.selected_share_row() {
+            ShareRow::Address => (&mut self.draft.share_address, 64),
+            ShareRow::Port => (&mut self.port_text, 5),
+            _ => return false,
+        };
+        text.clear();
+        self.share_editing = true;
+        self.share_error = None;
+        self.share_confirm = None;
+        true
+    }
+
+    pub fn share_edit_push(&mut self, ch: char) {
+        if !self.share_editing || !ch.is_ascii_graphic() {
+            return;
+        }
+        self.share_confirm = None;
+        if let Some((text, limit)) = match self.selected_share_row() {
+            ShareRow::Address => Some((&mut self.draft.share_address, 64)),
+            ShareRow::Port => Some((&mut self.port_text, 5)),
+            _ => None,
+        } {
+            if text.len() < limit {
+                text.push(ch);
+            }
+        }
+    }
+
+    /// Insert a bracketed paste into the selected Share address or port. The
+    /// field was cleared when editing began, so the paste becomes its value;
+    /// non-printable characters and an oversized value are ignored rather than
+    /// silently truncated.
+    pub fn share_edit_push_str(&mut self, text: &str) {
+        if !self.share_editing {
+            return;
+        }
+        self.share_confirm = None;
+        let value: String = text
+            .trim()
+            .chars()
+            .filter(|ch| ch.is_ascii_graphic())
+            .collect();
+        if let Some((field, limit)) = match self.selected_share_row() {
+            ShareRow::Address => Some((&mut self.draft.share_address, 64)),
+            ShareRow::Port => Some((&mut self.port_text, 5)),
+            _ => None,
+        } {
+            if field.len() + value.len() <= limit {
+                field.push_str(&value);
+            }
+        }
+    }
+
+    pub fn share_edit_backspace(&mut self) {
+        if !self.share_editing {
+            return;
+        }
+        self.share_confirm = None;
+        if let Some(text) = match self.selected_share_row() {
+            ShareRow::Address => Some(&mut self.draft.share_address),
+            ShareRow::Port => Some(&mut self.port_text),
+            _ => None,
+        } {
+            text.pop();
+        }
+    }
+
+    pub fn end_share_edit(&mut self) {
+        self.share_editing = false;
+    }
+
+    /// Toggle the selected device check in the Share draft. Text rows and
+    /// buttons are not toggles and return `None`.
+    pub fn toggle_share_draft(&mut self) -> Option<bool> {
+        let ShareRow::Device(index) = self.selected_share_row() else {
+            return None;
+        };
+        let device = self.devices.get(index)?;
+        let path = device.path.clone();
+        self.share_confirm = None;
+        let checked = if self.draft_checked.remove(&path) {
+            false
+        } else {
+            let Some(identity) = device.identity.clone() else {
+                self.share_error =
+                    Some("this device has no captured identity; refresh and try again".to_string());
+                return Some(false);
+            };
+            self.draft_checked.insert_with_identity(path, identity);
+            true
+        };
+        self.share_error = None;
+        Some(checked)
+    }
+
+    /// Whether the Share draft differs from the settings and checked set in
+    /// effect. Saving or cancelling makes it false.
+    pub fn has_unsaved_share(&self) -> bool {
+        self.draft != self.settings
+            || self.port_text != self.draft.share_port.to_string()
+            || self.draft_checked != self.sharing.checked()
+    }
+
+    /// Open the Share page in the right pane. Its draft starts from what is in
+    /// effect; reopening it keeps any edits already made.
+    pub fn begin_share(&mut self) {
+        self.prompt = None;
+        self.focus = Focus::Right;
+        if self.view == View::Share {
+            return;
+        }
+        self.draft = self.settings.clone();
+        self.draft_checked = self.sharing.pending_checked.clone();
+        self.reconcile_share_checks(&self.detected_local_identities());
+        self.port_text = self.draft.share_port.to_string();
+        self.share_row = 0;
+        self.share_editing = false;
+        self.share_error = None;
+        self.share_confirm = None;
+        self.view = View::Share;
+    }
+
+    /// Keep the Share selection on a row that still exists after saving,
+    /// cancelling or starting changed which buttons are shown.
+    fn clamp_share_row(&mut self) {
+        let rows = self.share_rows().len();
+        self.share_row = self.share_row.min(rows.saturating_sub(1));
+    }
+
+    /// Throw away the Share page's edits and keep the effective share. The
+    /// page stays open so the human can see it was not applied.
+    pub fn cancel_share_edits(&mut self) {
+        self.draft = self.settings.clone();
+        self.draft_checked = self.sharing.pending_checked.clone();
+        self.port_text = self.draft.share_port.to_string();
+        self.share_editing = false;
+        self.share_error = None;
+        self.share_confirm = None;
+        self.clamp_share_row();
+    }
+
+    /// Show the Share page's effective values after a successful save.
+    pub fn commit_share_draft(&mut self) {
+        self.settings = self.draft.clone();
+        self.port_text = self.settings.share_port.to_string();
+        self.sharing.pending_checked = self.draft_checked.clone();
+        self.share_editing = false;
+        self.share_error = None;
+        self.share_confirm = None;
+        self.apply_scrollback();
+        self.clamp_share_row();
     }
 
     /// Keep every open screen's scrollback in line with the settings in effect.
@@ -1240,6 +1660,9 @@ impl AppState {
                 self.selected_button = Some(SidebarButton::Settings);
             }
         }
+        if self.has_warning() {
+            self.focus_compact_warning();
+        }
         for session in self.sessions.values_mut() {
             session.screen.resize(self.rows, self.cols);
             session.rows = self.rows;
@@ -1305,7 +1728,7 @@ impl AppState {
     /// The buttons the sidebar can draw at its current height, in drawing
     /// order. The navigation uses the same list as the renderer.
     pub fn sidebar_buttons(&self) -> Vec<SidebarButton> {
-        crate::render::available_sidebar_buttons(self.rows, self.cols)
+        crate::render::available_sidebar_buttons(self.rows, self.cols, self.has_warning())
     }
 
     /// Select one sidebar row. The shown stream is untouched: choosing a row
@@ -1343,11 +1766,19 @@ impl AppState {
         self.select_index(next.clamp(0, last as i32) as usize);
     }
 
+    /// Point the sidebar highlight at one of its visible buttons. An absent
+    /// button (a warning's Dismiss entry on a very short sidebar) is ignored.
+    pub fn select_sidebar_button(&mut self, button: SidebarButton) {
+        if self.sidebar_buttons().contains(&button) {
+            self.selected_button = Some(button);
+        }
+    }
+
     /// Point the sidebar highlight at the Settings button. The device row
     /// stays where it was, so the button is not a row that discovery can
     /// renumber into a device.
     pub fn select_settings_button(&mut self) {
-        self.selected_button = Some(SidebarButton::Settings);
+        self.select_sidebar_button(SidebarButton::Settings);
     }
 
     pub fn select_path(&mut self, path: &str) -> bool {
@@ -1378,6 +1809,20 @@ impl AppState {
         let selected = self
             .selected_device()
             .map(|device| (device.endpoint, device.path.clone()));
+        // The Share page's controls are positional rows too. Preserve the
+        // selected device by endpoint and path, so discovery removing an
+        // earlier row cannot turn a checkbox activation into Start/Stop.
+        let share_selection = (self.view == View::Share).then(|| {
+            let row = self.selected_share_row();
+            let device = match row {
+                ShareRow::Device(index) => self
+                    .devices
+                    .get(index)
+                    .map(|device| (device.endpoint, device.path.clone())),
+                _ => None,
+            };
+            (device, row)
+        });
         for device in &mut devices {
             device.endpoint = endpoint;
         }
@@ -1401,7 +1846,7 @@ impl AppState {
                 for (key, _) in missing {
                     self.remove_session(key);
                 }
-                self.notice = Some(Notice::error(format!(
+                self.set_notice(Notice::error(format!(
                     "no longer shared by the remote host: {}",
                     paths.join(", ")
                 )));
@@ -1455,6 +1900,21 @@ impl AppState {
         if self.settings_row >= settings_rows {
             self.settings_row = settings_rows.saturating_sub(1);
             self.settings_editing = false;
+        }
+        if let Some((device, row)) = share_selection {
+            let target = match device {
+                Some((endpoint, path)) => self
+                    .devices
+                    .iter()
+                    .position(|candidate| candidate.endpoint == endpoint && candidate.path == path)
+                    .map(ShareRow::Device)
+                    .or(Some(ShareRow::Address)),
+                None => Some(row),
+            };
+            let rows = self.share_rows();
+            self.share_row = target
+                .and_then(|target| rows.iter().position(|candidate| *candidate == target))
+                .unwrap_or(0);
         }
         // A button keeps the highlight; a device row keeps its device by
         // endpoint and path when the list was re-sorted or grew.
@@ -1602,11 +2062,8 @@ impl AppState {
                 // own kept rows and scrolled position. With nothing left, the
                 // view falls back to the empty stream.
                 View::Scrollback if self.shown.is_none() => self.view = View::Stream,
-                View::Scrollback
-                | View::Settings
-                | View::Pairing
-                | View::Connect
-                | View::McpPair => {}
+                View::Scrollback | View::Settings | View::Share | View::Connect | View::McpPair => {
+                }
             }
         }
         Some(session)
@@ -1699,16 +2156,15 @@ impl AppState {
         self.sharing.snapshot = snapshot.active.then_some(snapshot);
         if !self.sharing.active {
             self.sharing.pairing = None;
-            self.close_pairing_view();
+            self.close_share_view();
         }
         lost
     }
 
-    /// Leave a pairing view after sharing ended without the human asking.
-    /// The keys go back to the sidebar, so a later `s` cannot be written to a
-    /// remote stream that happens to be in the right pane.
-    pub fn close_pairing_view(&mut self) {
-        if self.view == View::Pairing {
+    /// Leave the Share page after sharing ended without the human asking.
+    /// The keys go back to the sidebar, so a later `s` only reopens the page.
+    pub fn close_share_view(&mut self) {
+        if self.view == View::Share {
             self.view = View::Stream;
             self.focus = Focus::Sidebar;
         }
@@ -1805,7 +2261,7 @@ impl AppState {
                     device_id: *device_id,
                 };
                 self.remove_session(key);
-                self.notice = Some(Notice::error(format!("unplugged: {path} ({reason})")));
+                self.set_notice(Notice::error(format!("unplugged: {path} ({reason})")));
             }
             Event::ControlGranted { device_id, holder } => {
                 self.set_control(endpoint, *device_id, Some(holder));
@@ -1833,7 +2289,7 @@ impl AppState {
                 if matches {
                     self.set_control(endpoint, *device_id, None);
                 }
-                self.notice = Some(Notice::info(format!("AI control released ({reason:?})")));
+                self.set_notice(Notice::info(format!("AI control released ({reason:?})")));
             }
             Event::ControlDenied {
                 device_id, holder, ..
@@ -1841,10 +2297,10 @@ impl AppState {
                 self.set_control(endpoint, *device_id, Some(holder));
             }
             Event::TransportClosed { reason } => {
-                self.notice = Some(Notice::error(format!("core connection closed: {reason}")));
+                self.set_notice(Notice::warning(format!("core connection closed: {reason}")));
             }
             Event::CoreShutdown { reason } => {
-                self.notice = Some(Notice::info(format!("core shutting down: {reason}")));
+                self.set_notice(Notice::info(format!("core shutting down: {reason}")));
             }
             Event::ClientJoined { .. } | Event::ClientLeft { .. } => {}
         }
@@ -1872,7 +2328,7 @@ impl AppState {
     /// Start the baud prompt for the highlighted closed device.
     pub fn begin_baud_prompt(&mut self) -> bool {
         let Some(device) = self.selected_device() else {
-            self.notice = Some(Notice::error("no device highlighted"));
+            self.set_notice(Notice::error("no device highlighted"));
             return false;
         };
         if device.device_id.is_some() {
@@ -2758,5 +3214,239 @@ mod sharing_tests {
         assert!(form.confirm_replace, "moving fields is not an edit");
         form.backspace();
         assert!(!form.confirm_replace);
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    fn state() -> AppState {
+        AppState::new(24, 80)
+    }
+
+    #[test]
+    fn an_ordinary_notice_clears_after_six_seconds_and_not_before() {
+        let mut state = state();
+        let start = Instant::now();
+        state.set_notice_at(Notice::error("old failure"), start);
+        state.expire_notices(start + Duration::from_secs(5));
+        assert!(state.notice.is_some(), "still readable before its time");
+        state.expire_notices(start + NOTICE_TTL);
+        assert!(
+            state.notice.is_none(),
+            "the stale failure no longer covers a new action"
+        );
+    }
+
+    #[test]
+    fn a_serious_warning_survives_ordinary_notices_until_dismissed() {
+        let mut state = state();
+        let start = Instant::now();
+        state.set_notice_at(Notice::warning("write may have reached the device"), start);
+        state.set_notice_at(Notice::info("opened /dev/a"), start);
+        state.expire_notices(start + Duration::from_secs(5));
+        let visible = state.notice.as_ref().expect("the warning is still visible");
+        assert!(visible.sticky);
+        assert!(visible.text.contains("write may have reached"));
+
+        assert!(state.dismiss_warning());
+        let deferred = state.notice.as_ref().expect("the ordinary notice follows");
+        assert!(!deferred.sticky);
+        assert!(deferred.text.contains("opened /dev/a"));
+    }
+
+    #[test]
+    fn multiple_warnings_are_shown_one_at_a_time_and_counted() {
+        let mut state = state();
+        let now = Instant::now();
+        state.set_notice_at(Notice::warning("first warning"), now);
+        state.set_notice_at(Notice::warning("second warning"), now);
+        assert_eq!(state.warning_position(), Some((1, 2)));
+        assert_eq!(state.notice.as_ref().unwrap().text, "first warning");
+
+        assert!(state.dismiss_warning());
+        assert_eq!(state.warning_position(), Some((1, 1)));
+        assert_eq!(state.notice.as_ref().unwrap().text, "second warning");
+        assert!(state.dismiss_warning());
+        assert!(!state.has_warning());
+        assert!(state.notice.is_none());
+    }
+
+    #[test]
+    fn opening_settings_or_the_share_page_keeps_a_serious_warning() {
+        let mut state = AppState::new(30, 100);
+        state.warning("write uncertain");
+        state.begin_settings();
+        assert!(state.has_warning(), "Settings must not erase a warning");
+        assert_eq!(state.notice.as_ref().unwrap().text, "write uncertain");
+        state.cancel_settings();
+        state.begin_share();
+        assert!(
+            state.has_warning(),
+            "the Share page must not erase it either"
+        );
+    }
+
+    #[test]
+    fn a_warning_row_does_not_move_the_share_or_connect_button() {
+        let mut state = AppState::new(30, 100);
+        state.warning("write uncertain");
+        state.select_sidebar_button(SidebarButton::Share);
+        assert_eq!(state.selected_button(), Some(SidebarButton::Share));
+        state.select_sidebar_button(SidebarButton::Connect);
+        assert_eq!(state.selected_button(), Some(SidebarButton::Connect));
+    }
+
+    #[test]
+    fn a_successful_corrective_action_clears_an_ordinary_notice_but_not_a_warning() {
+        let mut state = state();
+        state.info("settings not saved");
+        state.clear_ordinary_notice();
+        assert!(state.notice.is_none());
+
+        state.warning("write uncertain");
+        state.clear_ordinary_notice();
+        assert!(state.has_warning(), "a warning needs explicit dismissal");
+    }
+}
+
+#[cfg(test)]
+mod share_page_tests {
+    use super::*;
+
+    fn state() -> AppState {
+        let mut state = AppState::new(30, 100);
+        state.set_devices(vec![
+            DeviceEntry::new("/dev/ttyUSB0"),
+            DeviceEntry::new("/dev/ttyUSB1"),
+        ]);
+        state
+    }
+
+    #[test]
+    fn opening_the_share_page_never_starts_sharing_and_starts_from_the_effective_values() {
+        let mut state = state();
+        state.settings.share_address = "127.0.0.1".into();
+        state.settings.share_port = 7331;
+        state.begin_share();
+        assert_eq!(state.view, View::Share);
+        assert!(!state.sharing.active);
+        assert_eq!(state.draft.share_address, "127.0.0.1");
+        assert_eq!(state.port_text, "7331");
+        assert!(!state.has_unsaved_share());
+    }
+
+    #[test]
+    fn share_edits_are_dirty_until_cancelled_or_saved_and_buttons_appear() {
+        let mut state = state();
+        state.begin_share();
+        state.share_row = 1; // Port
+        assert!(state.begin_share_edit());
+        state.share_edit_push('7');
+        state.end_share_edit();
+        assert!(state.has_unsaved_share());
+        assert!(state.share_rows().contains(&ShareRow::Save));
+        assert!(state.share_rows().contains(&ShareRow::Cancel));
+
+        state.cancel_share_edits();
+        assert!(!state.has_unsaved_share());
+        assert_eq!(state.port_text, state.settings.share_port.to_string());
+    }
+
+    #[test]
+    fn checking_a_device_on_the_share_page_keeps_its_identity() {
+        let mut state = state();
+        state.begin_share();
+        state.share_row = 2; // first device
+        assert_eq!(state.toggle_share_draft(), Some(true));
+        assert!(state.draft_checked.contains("/dev/ttyUSB0"));
+        assert!(state
+            .draft_checked
+            .identities()
+            .contains_key("/dev/ttyUSB0"));
+        assert_eq!(state.toggle_share_draft(), Some(false));
+        assert!(!state.draft_checked.contains("/dev/ttyUSB0"));
+    }
+
+    #[test]
+    fn a_compact_warning_moves_the_highlight_to_its_visible_dismiss_row() {
+        // These are the body dimensions the event loop stores, not the whole
+        // terminal with its header and footer.
+        let mut state = AppState::new(3, 40);
+        state.set_devices(vec![DeviceEntry::new("/dev/ttyUSB0")]);
+        state.select_index(0);
+        assert_eq!(state.selected_button(), None);
+        assert!(
+            crate::render::short_warning_shares_list(3, 40),
+            "compact layout"
+        );
+        state.warning("write uncertain");
+        assert_eq!(
+            state.selected_button(),
+            Some(SidebarButton::Dismiss),
+            "Enter must act on the label that covers the device row"
+        );
+    }
+
+    #[test]
+    fn moving_the_share_selection_keeps_an_action_failure_visible() {
+        let mut state = state();
+        state.begin_share();
+        state.share_error = Some("no settings file".into());
+        state.move_share_row(1);
+        assert_eq!(
+            state.share_error.as_deref(),
+            Some("no settings file"),
+            "navigating is not a correction or a dismissal"
+        );
+    }
+
+    #[test]
+    fn discovery_keeps_the_selected_share_device_by_path() {
+        let mut state = state();
+        state.begin_share();
+        state.share_row = 3; // the second device row
+        assert_eq!(state.selected_share_row(), ShareRow::Device(1));
+
+        // Removing the earlier device renumbers the survivor; the selection
+        // follows the same device instead of landing on Start/Stop.
+        state.set_devices(vec![DeviceEntry::new("/dev/ttyUSB1")]);
+        assert_eq!(state.selected_share_row(), ShareRow::Device(0));
+
+        // A removed selected device falls back to the safe Address row.
+        state.set_devices(Vec::new());
+        assert_eq!(state.selected_share_row(), ShareRow::Address);
+    }
+
+    #[test]
+    fn a_bracketed_paste_fills_a_share_endpoint_field() {
+        let mut state = state();
+        state.begin_share();
+        state.share_row = 0; // Address
+        assert!(state.begin_share_edit());
+        state.share_edit_push_str("127.0.0.2\n");
+        assert_eq!(state.draft.share_address, "127.0.0.2");
+        state.end_share_edit();
+
+        state.share_row = 1; // Port
+        assert!(state.begin_share_edit());
+        state.share_edit_push_str("7444");
+        assert_eq!(state.port_text, "7444");
+    }
+
+    #[test]
+    fn clearing_a_connect_key_keeps_the_endpoint_and_forgets_the_invalid_paste() {
+        let mut form = ConnectForm::new();
+        form.address = "192.0.2.1".into();
+        form.port = "7331".into();
+        form.field = ConnectField::Key;
+        form.push_str("snx1.human.not a key");
+        assert!(form.key_invalid);
+        form.clear_key();
+        assert!(form.key.is_empty());
+        assert!(!form.key_invalid);
+        assert_eq!(form.address, "192.0.2.1");
+        assert_eq!(form.port, "7331");
     }
 }

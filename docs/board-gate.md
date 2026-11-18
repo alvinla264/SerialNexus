@@ -22,7 +22,7 @@ and one real LAN address, and never flashes the board or changes firmware.
    still works after sharing stops.
 
 It runs the coordinator's exact-head acceptance for the sharing-key flow as
-well: the pairing view's two keys, a human key paired through the normal form,
+well: the Share page's two keys, a human key paired through the normal form,
 an old key failing after a sharing restart, and the terminal's MCP pairing
 action saving the AI key that the remote MCP gate then uses. It does not test
 firmware behaviour beyond what the existing firmware prints or echoes,
@@ -92,21 +92,25 @@ or credential.
 This is the gate that covers the new normal pairing experience on real
 hardware. On the coordinator's machine:
 
-1. Start the host terminal. In Settings, set a concrete LAN address and port,
-   check the board, Save, then start sharing (`s`). Open the pairing view
-   (`p`) and confirm it shows the bound address, a **Human terminal key** and a
-   distinct **MCP/AI key**, both starting `snx1.`. Press `a` and confirm the
-   older host fields (host name, `certificate SHA-256`, CA and two raw
-   credentials) are still shown; press `a` again.
+1. Start the host terminal. Open the Share page (`s`/`p` or the sidebar's
+   Share button), set a concrete LAN address and port, check the board, and
+   press the page's explicit `[ Start sharing ]`; opening the page must not
+   start a listener. Confirm it shows the bound address, a **Human terminal
+   key** and a distinct **MCP/AI key**, both starting `snx1.`, plus visible
+   `[ Copy human key ]` and `[ Copy MCP/AI key ]` buttons. Activate the Advanced row and confirm
+   the older host fields (host name, `certificate SHA-256`, CA and two raw
+   credentials) are still shown; activate the Advanced row again. Keep sharing
+   on for the remote pairing and connection below.
 2. Start a second `serial-nexus-terminal` on another machine (or another
    user's session). `[ Connect ]`, type the host address and port, then paste
    the whole **human key** in one action and press Enter. Confirm the board
    appears under `Remote <address:port>`, open it and read real firmware
    output. This proves the normal key path, strict role/host checks, TLS CA,
    name and pin verification, and the selected-device ACL.
-3. On the host, stop and restart sharing. In the second terminal, try the same
-   old human key again: it must fail clearly and must not print the key or
-   fall back to an unverified connection. Pair with the new key.
+3. After the successful connection, stop and restart sharing on the host. In
+   the second terminal, try the same old human key again: it must fail clearly
+   and must not print the key or fall back to an unverified connection. Obtain
+   the newly issued human key from the host and pair with it.
 4. In the host terminal's sidebar press `m`, enter the address, port and the
    host's new **MCP/AI key**, and press Enter. Confirm the terminal says the
    MCP pairing was saved and that `~/.config/serial-nexus/mcp-peers.json` is

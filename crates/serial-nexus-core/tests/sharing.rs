@@ -593,6 +593,41 @@ fn connection_limits_refuse_new_peers_without_disturbing_existing_ones() {
 }
 
 #[test]
+fn stopping_sharing_during_remote_write_events_completes_revocation() {
+    let core = shared_core();
+    let owner = local_owner(&core);
+    let device = SimulatedDevice::new();
+    owner
+        .open(&device.path, Some(115_200), false)
+        .expect("open device");
+    let info = owner
+        .start_sharing(localhost_bind(), vec![device.path.clone()])
+        .expect("start sharing");
+    let remote = remote(&info, PairingRole::Human, "writer").expect("pair");
+    let opened = remote
+        .open(&device.path, None, false)
+        .expect("open remotely");
+    let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal writer");
+        for _ in 0..100 {
+            if remote.write_bytes(opened.device_id, b"x", None).is_err() {
+                break;
+            }
+        }
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("writer started");
+
+    owner
+        .stop_sharing()
+        .expect("revocation completes during writes");
+    writer.join().expect("writer thread");
+    assert!(!owner.sharing_status().expect("status").active);
+}
+
+#[test]
 fn stopping_sharing_during_a_waited_write_fails_it_without_replaying() {
     let core = shared_core();
     let owner = local_owner(&core);
@@ -1667,6 +1702,72 @@ fn a_detached_waited_write_fails_and_never_returns_post_revocation_output() {
 }
 
 #[test]
+fn prepared_handover_binds_a_candidate_without_disturbing_the_active_share() {
+    let core = shared_core();
+    let owner = local_owner(&core);
+    let device = SimulatedDevice::new();
+    owner
+        .open(&device.path, Some(115_200), false)
+        .expect("open");
+    let old = owner
+        .start_sharing(localhost_bind(), vec![device.path.clone()])
+        .expect("start");
+    let remote = remote(&old, PairingRole::Human, "before-handover").expect("old remote");
+
+    let prepared = owner
+        .prepare_share_rebind_expected(
+            localhost_bind(),
+            vec![device.path.clone()],
+            std::collections::BTreeMap::new(),
+        )
+        .expect("bind candidate while old listener remains active");
+    let bound = prepared.bound.expect("the actual candidate endpoint");
+    assert_ne!(bound, old.bind);
+    assert!(remote.list_devices().is_ok());
+    assert_eq!(
+        owner.sharing_status().expect("active state").bind,
+        Some(old.bind)
+    );
+    owner
+        .cancel_share_rebind(prepared.token)
+        .expect("cancel candidate");
+    assert_eq!(
+        owner.sharing_status().expect("old state").bind,
+        Some(old.bind)
+    );
+    assert!(
+        remote.list_devices().is_ok(),
+        "cancel kept old peer connected"
+    );
+}
+
+#[test]
+fn only_the_active_owner_can_prepare_an_endpoint_handover() {
+    let core = shared_core();
+    let owner = local_owner(&core);
+    let device = SimulatedDevice::new();
+    owner
+        .open(&device.path, Some(115_200), false)
+        .expect("open");
+    owner
+        .start_sharing(localhost_bind(), vec![device.path.clone()])
+        .expect("start");
+    let other = connect(&core.socket, ClientInfo::human("other-local"));
+    let error = other
+        .prepare_share_rebind_expected(
+            ShareBind::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            vec![device.path.clone()],
+            std::collections::BTreeMap::new(),
+        )
+        .expect_err("another local human must not replace the owner session");
+    assert!(matches!(
+        error,
+        ClientError::Server(ref body) if body.code == ErrorCode::PermissionDenied
+    ));
+    assert!(owner.sharing_status().expect("old session").active);
+}
+
+#[test]
 fn remote_sharing_administration_requests_are_refused_on_the_wire() {
     let core = shared_core();
     let owner = local_owner(&core);
@@ -1689,6 +1790,32 @@ fn remote_sharing_administration_requests_are_refused_on_the_wire() {
                 devices: vec![device.path.clone()],
                 expected: std::collections::BTreeMap::new(),
             }),
+        ),
+        (
+            4,
+            serial_nexus_protocol::Request::ShareRebindPrepare(
+                serial_nexus_protocol::ShareRebindParams {
+                    bind: localhost_bind(),
+                    devices: vec![device.path.clone()],
+                    expected: std::collections::BTreeMap::new(),
+                },
+            ),
+        ),
+        (
+            5,
+            serial_nexus_protocol::Request::ShareRebindCommit(
+                serial_nexus_protocol::ShareCommitParams {
+                    token: "forged".into(),
+                },
+            ),
+        ),
+        (
+            6,
+            serial_nexus_protocol::Request::ShareRebindCancel(
+                serial_nexus_protocol::ShareCommitParams {
+                    token: "forged".into(),
+                },
+            ),
         ),
     ] {
         let frame = serial_nexus_protocol::encode_frame(&serial_nexus_protocol::RequestMessage {

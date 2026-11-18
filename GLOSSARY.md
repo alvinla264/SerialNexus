@@ -160,20 +160,28 @@ LAN sharing and remote-client terms (the core contract is in
   human key and an MCP/AI key are distinct and cannot be used for the other
   role. A key is password-equivalent: memory-only in the receiving terminal,
   never logged or sent to a device, and stale keys fail once sharing restarts.
-- **Human key** and **MCP/AI key**: the two sharing keys the **pairing view**
+- **Human key** and **MCP/AI key**: the two sharing keys the **Share page**
   shows while sharing is active. The human key goes with the address and port
   into another terminal's **Connect form**; the AI key goes with them into the
   **MCP pairing form**.
-- **Pairing view**: the owner-only right-pane view (`p`). Normally it shows the
-  bound address and the two distinct sharing keys; `c` and `C` ask the terminal
-  (OSC 52) to copy the complete human or MCP/AI key, because selecting the
-  hard-wrapped rows would add line breaks; `v`/`V` show one key as a single
-  soft-wrapped line for a terminal that ignores clipboard escapes, refusing a
-  pane too short for the whole line rather than clipping it. `a`
-  toggles the **older host fields** (host name, fingerprint, CA certificate and the separate raw
-  credentials) for a terminal that predates keys.
-- **Connect form**: the remote terminal's memory-only form for a host address,
-  port and one human sharing key. `Ctrl+A` switches it to the older host fields
+- **Share page**: the owner-only right-pane view (`s`/`p` or the sidebar's
+  Share button) with the address, port, device checklist and explicit Start and
+  Stop buttons. Opening the page selects nothing on the network; Start with an
+  unsaved draft asks `Save and start` or `Cancel`, and Stop asks for a second
+  confirmation. While active, checklist edits apply only on Save. A changed
+  address or port asks for a second confirmation; a prepared endpoint is bound
+  before the settings file is published, so a bind or persistence failure keeps
+  the old listener, long keys and remote clients active with the draft retained.
+  A successful handover disconnects old remote clients and issues fresh long
+  keys. The active state shows its bound address and distinct sharing keys;
+  visible Copy and Show key buttons ask for OSC 52 copying or display a key as
+  one soft-wrapped line when clipboard escapes are ignored. The **older host fields**
+  (host name, fingerprint, CA certificate and the separate raw credentials) for
+  a terminal that predates keys.
+- **Connect form**: the remote terminal's memory-only page for a host address,
+  port and one human sharing key, with explicit Connect and Clear key buttons;
+  Clear removes the complete key and keeps the endpoint. Opening the page never
+  connects. `Ctrl+A` switches it to the older host fields
   (address, port, CA certificate, fingerprint and human credential) for a host
   that predates keys. A wrong certificate or key is refused rather than
   trusted.

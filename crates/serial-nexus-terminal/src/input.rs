@@ -65,12 +65,33 @@ pub enum Action {
     SettingsEditDone,
     SettingsSave,
     SettingsCancel,
-    /// Start or stop the local sharing session.
-    ShareToggle,
-    /// Show the owner's pairing information for the running session.
-    OpenPairing,
+    /// Open the owner's Share page. Selecting or activating the sidebar entry
+    /// never starts, stops or connects anything.
+    OpenShare,
     /// Ask for a remote host's address, port and sharing key.
     ConnectRemote,
+    /// Move the Share page selection over its fields, devices and buttons.
+    ShareMove(i32),
+    /// Start or stop editing the selected Share address or port.
+    ShareBeginEdit,
+    ShareEditChar(char),
+    ShareEditBackspace,
+    /// Stop editing the text row, keeping what was typed in the draft.
+    ShareEditDone,
+    /// Toggle the selected Share device checkbox.
+    ShareToggleDraft,
+    /// Activate the selected Share row (a device or an explicit button).
+    ShareActivate,
+    /// Save the Share draft without activating whichever row is selected.
+    ShareSave,
+    /// Cancel the Share draft, a pending confirmation, or leave the page.
+    ShareCancel,
+    /// Scroll the Share page's key/details area.
+    ShareScroll(i32),
+    /// Clear the whole key in the Connect form, keeping address and port.
+    ConnectClearKey,
+    /// Dismiss the visible serious warning from the sidebar.
+    DismissNotice,
     /// Switch the Connect form between the sharing key and older-host fields.
     ConnectToggleMode,
     ConnectChar(char),
@@ -85,9 +106,7 @@ pub enum Action {
     McpNext(i32),
     McpSubmit,
     McpCancel,
-    /// Leave the pairing view for the stream.
-    LeavePairing,
-    /// Show or hide the older host fields in the pairing view.
+    /// Show or hide the older host fields on the Share page.
     PairingToggleAdvanced,
     /// Ask the terminal to copy the complete human key to its clipboard.
     CopyHumanKey,
@@ -108,8 +127,8 @@ pub enum Action {
 /// shown device, `Tab` and `Ctrl+Q` included. Only `Ctrl+]` leaves it, which is
 /// why the sidebar's `]` sends a literal `Ctrl+]`. The sidebar is the command
 /// surface: `Ctrl+Q` quits there, `b` shows the highlighted device's scrollback,
-/// `s` starts or stops sharing, `p` shows the pairing information, `c` asks for
-/// a remote host, and the buttons are rows of it. The scrollback view navigates
+/// `s` and `p` open the Share page, `c` opens the Connect page, and the
+/// buttons are rows of it; none of them starts or stops sharing by itself. The scrollback view navigates
 /// with the arrow and page keys; they never reach the device from there.
 ///
 /// The device keys always belong to the *shown* device, never to the sidebar's
@@ -131,7 +150,7 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
         };
     }
     if key == Key::Ctrl(']') {
-        // The focus moves even while Settings or the pairing view are open:
+        // The focus moves even while Settings or the Share page are open:
         // the sidebar stays visible beside them, and the draft is kept.
         return Action::ToggleFocus;
     }
@@ -152,6 +171,15 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
         return match key {
             Key::Esc => Action::ConnectCancel,
             Key::Ctrl('a') => Action::ConnectToggleMode,
+            Key::Ctrl('l') => Action::ConnectClearKey,
+            Key::Delete
+                if state
+                    .connect
+                    .as_ref()
+                    .is_some_and(|form| form.field == crate::state::ConnectField::Key) =>
+            {
+                Action::ConnectClearKey
+            }
             Key::Enter => Action::ConnectSubmit,
             Key::Tab | Key::Down => Action::ConnectNext(1),
             Key::BackTab | Key::Up => Action::ConnectNext(-1),
@@ -199,7 +227,7 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             // The sidebar can still feed the shown device while the right
             // pane is its stream: `]` is the literal Ctrl+] the stream cannot
             // send without leaving it. It writes nothing while the settings,
-            // scrollback or pairing view own the pane.
+            // scrollback or Share page own the pane.
             Key::Char(']') if state.view == View::Stream => Action::Write(vec![0x1d]),
             Key::Up | Key::Char('k') => Action::Select(-1),
             Key::Down | Key::Char('j') => Action::Select(1),
@@ -214,10 +242,10 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Char('b') if state.highlighted_session().is_some() => Action::EnterScrollback,
             Key::Char('b') => Action::StartBaudPrompt,
             Key::Char('d') => Action::DisconnectSelected,
-            Key::Char('s') => Action::ShareToggle,
-            Key::Char('p') => Action::OpenPairing,
+            Key::Char('s') | Key::Char('p') => Action::OpenShare,
             Key::Char('c') => Action::ConnectRemote,
             Key::Char('m') => Action::McpPairRemote,
+            Key::Char('x') if state.has_warning() => Action::DismissNotice,
             _ => Action::Ignore,
         },
         (Focus::Right, View::Stream) => match encode_key(key) {
@@ -233,20 +261,28 @@ pub fn map_key(state: &AppState, key: Key) -> Action {
             Key::Esc => Action::LeaveScrollback,
             _ => Action::Ignore,
         },
-        (Focus::Right, View::Pairing) => match key {
-            Key::Esc => Action::LeavePairing,
-            Key::Char('s') => Action::ShareToggle,
-            Key::Char('a') => Action::PairingToggleAdvanced,
-            Key::Char('c') => Action::CopyHumanKey,
-            Key::Char('C') => Action::CopyAiKey,
-            Key::Char('v') => Action::ShowHumanKey,
-            Key::Char('V') => Action::ShowAiKey,
-            Key::Up => Action::PairingScroll(-1),
-            Key::Down => Action::PairingScroll(1),
-            Key::PageUp => Action::PairingScroll(-(state.rows().max(1) as i32)),
-            Key::PageDown => Action::PairingScroll(state.rows().max(1) as i32),
-            _ => Action::Ignore,
-        },
+        (Focus::Right, View::Share) => {
+            if state.share_editing {
+                return match key {
+                    Key::Enter | Key::Esc | Key::Tab | Key::BackTab => Action::ShareEditDone,
+                    Key::Backspace => Action::ShareEditBackspace,
+                    Key::Char(ch) if ch.is_ascii_graphic() => Action::ShareEditChar(ch),
+                    _ => Action::Ignore,
+                };
+            }
+            match key {
+                Key::Esc => Action::ShareCancel,
+                Key::Up | Key::BackTab => Action::ShareMove(-1),
+                Key::Down | Key::Tab | Key::Char('j') => Action::ShareMove(1),
+                Key::Char('k') => Action::ShareMove(-1),
+                Key::Enter => Action::ShareActivate,
+                Key::Char(' ') => Action::ShareToggleDraft,
+                Key::Ctrl('s') => Action::ShareSave,
+                Key::PageUp => Action::ShareScroll(-(state.rows().max(1) as i32)),
+                Key::PageDown => Action::ShareScroll(state.rows().max(1) as i32),
+                _ => Action::Ignore,
+            }
+        }
         // The settings and connect branches above own their right-focused
         // views; the left-focused ones take the sidebar's commands instead.
         (Focus::Right, View::Settings | View::Connect | View::McpPair) => Action::Ignore,
@@ -609,27 +645,65 @@ mod sharing_input_tests {
     }
 
     #[test]
-    fn the_sidebar_offers_sharing_pairing_and_remote_connect() {
+    fn the_sidebar_opens_sharing_and_remote_connect_pages_only() {
         let state = state();
-        assert_eq!(map_key(&state, Key::Char('s')), Action::ShareToggle);
-        assert_eq!(map_key(&state, Key::Char('p')), Action::OpenPairing);
+        assert_eq!(map_key(&state, Key::Char('s')), Action::OpenShare);
+        assert_eq!(map_key(&state, Key::Char('p')), Action::OpenShare);
         assert_eq!(map_key(&state, Key::Char('c')), Action::ConnectRemote);
+        assert_eq!(
+            map_key(&state, Key::Enter),
+            Action::OpenSelected,
+            "Enter on the highlighted Share entry only opens its page"
+        );
     }
 
     #[test]
-    fn the_pairing_view_scrolls_and_stops_sharing() {
+    fn ctrl_s_on_the_share_page_saves_instead_of_activating_the_selection() {
         let mut state = state();
-        state.view = View::Pairing;
+        state.view = View::Share;
         state.focus = Focus::Right;
-        assert_eq!(map_key(&state, Key::Down), Action::PairingScroll(1));
-        assert_eq!(map_key(&state, Key::Up), Action::PairingScroll(-1));
-        assert_eq!(map_key(&state, Key::PageDown), Action::PairingScroll(20));
-        assert_eq!(map_key(&state, Key::Esc), Action::LeavePairing);
-        assert_eq!(map_key(&state, Key::Char('s')), Action::ShareToggle);
+        state.share_row = state
+            .share_rows()
+            .iter()
+            .position(|row| *row == crate::state::ShareRow::StartStop)
+            .expect("Start row");
+        assert_eq!(map_key(&state, Key::Ctrl('s')), Action::ShareSave);
+    }
+
+    #[test]
+    fn the_share_page_navigates_fields_and_buttons_without_device_input() {
+        let mut state = state();
+        state.view = View::Share;
+        state.focus = Focus::Right;
+        assert_eq!(map_key(&state, Key::Down), Action::ShareMove(1));
+        assert_eq!(map_key(&state, Key::Up), Action::ShareMove(-1));
+        assert_eq!(map_key(&state, Key::PageDown), Action::ShareScroll(20));
+        assert_eq!(map_key(&state, Key::Esc), Action::ShareCancel);
+        assert_eq!(map_key(&state, Key::Enter), Action::ShareActivate);
         assert_eq!(
             map_key(&state, Key::Char('x')),
             Action::Ignore,
-            "nothing typed in the pairing view reaches a device"
+            "nothing typed on the Share page reaches a device"
+        );
+    }
+
+    #[test]
+    fn only_a_pending_warning_binds_x_to_dismiss_and_a_stream_keeps_it() {
+        let mut state = state();
+        assert_eq!(
+            map_key(&state, Key::Char('x')),
+            Action::Ignore,
+            "x is an ordinary command key only when a warning needs dismissing"
+        );
+        state.warning("write uncertain");
+        assert_eq!(map_key(&state, Key::Char('x')), Action::DismissNotice);
+        // A focused serial stream never loses a keystroke to the notice UI.
+        state.add_session(7, "/dev/ttyUSB0", 115_200, None);
+        state.focus = Focus::Right;
+        state.view = View::Stream;
+        assert_eq!(
+            map_key(&state, Key::Char('x')),
+            Action::Write(b"x".to_vec())
         );
     }
 
@@ -642,7 +716,7 @@ mod sharing_input_tests {
         state.focus = Focus::Sidebar;
         assert_eq!(
             map_key(&state, Key::Char('s')),
-            Action::ShareToggle,
+            Action::OpenShare,
             "the sidebar owns keys once focus moved there"
         );
         assert_eq!(map_key(&state, Key::Char('x')), Action::Ignore);
@@ -699,14 +773,16 @@ mod sharing_input_tests {
     fn the_sidebar_opens_mcp_pairing_and_the_pairing_view_its_older_details() {
         let mut state = AppState::new(24, 80);
         assert_eq!(map_key(&state, Key::Char('m')), Action::McpPairRemote);
-        state.view = View::Pairing;
+        state.view = View::Share;
         state.focus = Focus::Right;
-        assert_eq!(
-            map_key(&state, Key::Char('a')),
-            Action::PairingToggleAdvanced
-        );
-        assert_eq!(map_key(&state, Key::Char('v')), Action::ShowHumanKey);
-        assert_eq!(map_key(&state, Key::Char('V')), Action::ShowAiKey);
+        for key in ['a', 'c', 'C', 'v', 'V'] {
+            assert_eq!(
+                map_key(&state, Key::Char(key)),
+                Action::Ignore,
+                "ordinary text key {key:?} must not trigger a hidden Share action"
+            );
+        }
+        assert_eq!(map_key(&state, Key::Enter), Action::ShareActivate);
         state.view = View::McpPair;
         assert_eq!(map_key(&state, Key::Char('a')), Action::McpChar('a'));
         state.mcp_pair = Some(McpPairForm::new());

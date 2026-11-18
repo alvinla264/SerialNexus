@@ -346,6 +346,9 @@ impl Backend {
             | Request::ShareReplace(_)
             | Request::SharePrepare(_)
             | Request::ShareCommit(_)
+            | Request::ShareRebindPrepare(_)
+            | Request::ShareRebindCommit(_)
+            | Request::ShareRebindCancel(_)
             | Request::ShareUncheck(_)
             | Request::ShareStatus => Err(ClientError::Server(ErrorBody::new(
                 ErrorCode::PermissionDenied,

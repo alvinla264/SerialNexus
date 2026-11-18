@@ -126,11 +126,12 @@ readable by the laptop user only. The MCP process sends only the configured
 file path through local gateway IPC; the terminal gateway opens and validates
 the file, then performs the paired TLS connection itself:
 
-1. On the host, open terminal Settings and choose the detected devices to
-   share, save, and start sharing. Press `p` with the sidebar focused to open
-   the owner-only Pairing view; it shows the bound address and an **MCP/AI
-   sharing key**. Treat that key as a password; it is created for this session
-   only. See [`docs/sharing.md`](../../docs/sharing.md) for the core contract.
+1. On the host, open the terminal's Share page (`s`/`p` or the sidebar
+   button), choose the detected devices to share, and press its explicit Start
+   sharing button. The page shows the bound address and an **MCP/AI sharing
+   key**, plus visible Copy buttons. Treat that key as a password; it is
+   created for this session only. See
+   [`docs/sharing.md`](../../docs/sharing.md) for the core contract.
 2. On this machine, start `serial-nexus-terminal`, focus the sidebar and press
    `m`. Enter the host's address and port, paste the MCP/AI key, and press
    `Enter`. The terminal saves the entry to the default pairing file

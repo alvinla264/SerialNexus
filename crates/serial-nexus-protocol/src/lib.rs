@@ -140,6 +140,13 @@ pub enum Request {
     SharePrepare(ShareDevicesParams),
     /// Apply a prepared checklist. Local owner only.
     ShareCommit(ShareCommitParams),
+    /// Bind and prepare a replacement active listener without changing the
+    /// current session. The owner commits only after settings are published.
+    ShareRebindPrepare(ShareRebindParams),
+    /// Atomically disconnect the old session and activate a prepared endpoint.
+    ShareRebindCommit(ShareCommitParams),
+    /// Discard a prepared endpoint while leaving the active session untouched.
+    ShareRebindCancel(ShareCommitParams),
     /// Remove devices from the allowlist and revoke remote access at once.
     /// Local owner only.
     ShareUncheck(ShareDevicesParams),

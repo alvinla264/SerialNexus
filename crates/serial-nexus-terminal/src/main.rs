@@ -51,7 +51,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut app = App::with_preferences(client, 24, 80, settings, store);
     if let Some(message) = settings_error {
-        app.state.notice = Some(Notice::error(message));
+        app.state.set_notice(Notice::error(message));
     }
 
     // The guard restores raw mode and the alternate screen on every exit path,
@@ -122,7 +122,7 @@ fn draw_key_for_copy(
         // person presses v again and the whole line is shown.
         writeln!(
             stdout,
-            "SerialNexus {} — this pane is too small for the whole key. Press any key, enlarge the pane, then press v or V again.",
+            "SerialNexus {} — this pane is too small for the whole key. Press any key, enlarge the pane, then activate its Show key button again.",
             view.label
         )?;
         stdout.flush()?;
@@ -151,6 +151,9 @@ fn event_loop(
     let mut last_area = Rect::default();
     loop {
         app.pump();
+        // Ordinary notices clear themselves; serious warnings wait for the
+        // sidebar's explicit Dismiss action.
+        app.state.expire_notices(Instant::now());
         while let Some(copy) = app.take_clipboard_copy() {
             // OSC 52 asks the terminal to set its clipboard; a terminal that
             // does not support it simply ignores the sequence.

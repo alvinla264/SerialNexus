@@ -204,7 +204,7 @@ stops sharing it owns.
 
 - At a usable width the terminal shows the device sidebar on the left and the
   right pane beside it: the shown device's stream, its scrollback, Settings,
-  the owner-only Pairing view, or the remote Connect form. A narrow terminal cannot fit both, so it shows the focused
+  the owner's Share page, or the remote Connect page. A narrow terminal cannot fit both, so it shows the focused
   pane only. `Ctrl+]` moves the keyboard focus between the sidebar and the right
   pane; the header names the focused pane, the focused pane's title (or the
   pane edge) is highlighted, and the visible cursor follows the focus — the
@@ -228,9 +228,11 @@ stops sharing it owns.
   joins the highlighted device, `b` shows the highlighted attached device's
   scrollback (or, for a closed device that has none, the baud prompt) and `d`
   disconnects the highlighted device. `m` opens the MCP pairing form. The sidebar also has Share and Connect
-  buttons before Settings: Share starts or stops the local host session (and
-  opens pairing information when active), while Connect opens the remote host
-  form. Focus buttons with arrows and activate with `Enter`, or click them.
+  buttons before Settings. Both only open their page in the right pane: neither
+  a click, a highlight, nor `Enter` starts or stops sharing or connects a host.
+  `s` and `p` open the Share page; `c` opens the Connect page. Focus buttons with
+  arrows and activate with `Enter`, or click them. Every network action is a
+  separate button on the page.
   `Ctrl+Q` quits from here, even while the baud prompt is open. `]`
   sends a literal `Ctrl+]` to the shown device while that device's stream is in
   the right pane; it writes nothing while the settings or scrollback are shown,
@@ -283,9 +285,16 @@ stops sharing it owns.
   clicked; Save or Cancel is the way out. Scrollback is saved like the other
   flag: turning it off frees every session's kept rows and brings the view back
   to live, and turning it on starts keeping rows from then on.
-- The footer has a status line (errors, unplug notices, setting changes, the
-  baud prompt) and a line of key hints for the focused pane. A short terminal
-  keeps the status line and hides the hints.
+- The footer has a status line (notices, the baud prompt) and a line of key
+  hints for the focused pane. An ordinary notice — including a validation
+  reason that is not shown in its form — clears itself after about six seconds,
+  and a successful corrective action can clear it sooner. A serious warning,
+  such as a write whose answer was lost or sharing status that cannot be
+  confirmed, stays visible until it is explicitly dismissed from the sidebar
+  with the `[ Dismiss warning ]` row (`x`), even if ordinary notices arrive;
+  multiple warnings are shown one at a time and counted. Dismissal never takes
+  an ordinary keystroke from a focused serial stream. A short terminal keeps
+  the status line and hides the hints.
 - Settings are stored per user in `$XDG_CONFIG_HOME/serial-nexus/terminal.json`
   (`~/.config/serial-nexus/terminal.json` when `XDG_CONFIG_HOME` is unset and
   `HOME` is set). The file holds `local_echo` and `scrollback` (both on by
@@ -381,8 +390,8 @@ a time per session, bounded waits and reads, Linux only).
 
 The MCP server can use a remote sharing session through the private pairing
 file described in [the MCP pairing guide](../crates/serial-nexus-mcp/README.md#reach-a-device-shared-by-another-host).
-In the terminal, start sharing and open the Pairing view (`p`) to read the
-**MCP/AI sharing key**. With the sidebar focused, `m` opens the MCP pairing
+In the terminal, start sharing and open the Share page (`p`/`s`, or the sidebar
+button) to read the **MCP/AI sharing key**. With the sidebar focused, `m` opens the MCP pairing
 form: enter the endpoint address, port and paste the AI key, then `Enter`. The
 terminal saves the entry to `~/.config/serial-nexus/mcp-peers.json` (or the
 configured `SERIAL_NEXUS_MCP_PEERS` path) with mode `0600`, atomically and
@@ -399,49 +408,65 @@ documented format still works.
 ### Sharing devices on the LAN from the terminal
 
 Sharing is opt-in and off by default. The sidebar has `[ Share: off ]` between
-the device list and the Settings button; `s` does the same from the sidebar.
-Nothing listens on the network until it is started deliberately.
+the device list and the Settings button; clicking it, highlighting it and
+pressing `Enter`, or pressing `s`/`p`, only opens the **Share page**. Nothing
+listens on the network until the page's explicit `[ Start sharing ]` button is
+activated.
 
-1. Open Settings and type the interface address and port the host should listen
-   on: one concrete IPv4 or IPv6 address (for example `192.168.1.20` or `::1`).
-   A link-local IPv6 address carries its interface index, for example
-   `fe80::1%3`. A wildcard such as `0.0.0.0` or `::` is refused. The address and port are
-   saved preferences; the device checklist is not.
+1. On the Share page, type the interface address and port the host should
+   listen on: one concrete IPv4 or IPv6 address (for example `192.168.1.20` or
+   `::1`). A link-local IPv6 address carries its interface index, for example
+   `fe80::1%3`. A wildcard such as `0.0.0.0` or `::` is refused. The address
+   and port are saved preferences; the device checklist is not.
 2. Tick the detected devices to share. A device does not need to be open by the
    host, and at least one must be ticked before sharing can start. `Space` or
    `Enter` toggles a checkbox; clicking it does the same.
-3. `Ctrl+S`/`[ Save ]` writes the preferences and applies the checklist. `Esc`/
-   `[ Cancel ]` throws both away. A save that fails — a refused checklist change
-   or a settings file that cannot be written — applies neither the checklist nor
-   the preferences and keeps the draft.
-4. Start sharing with the Share button or `s`. A bind failure is shown in the
-   footer and sharing stays off. Once on, the pairing view shows the bound
-   address and what a remote client needs.
+3. `[ Save ]` writes the preferences and applies the checklist; `[ Cancel ]`
+   throws the edits away and keeps the effective share exactly as it was. A
+   save that fails — a refused checklist change or a settings file that cannot
+   be written — applies neither the checklist nor the preferences, keeps the
+   draft, and shows the reason in the page.
+4. Activate `[ Start sharing ]`. With unsaved address, port or selection the
+   page first asks `[ Save and start ]` or `[ Cancel ]`; a failed save keeps the
+   draft and leaves sharing off. A bind failure is shown in the page and
+   sharing stays off. Once on, the page shows the bound state and the keys.
 
-The pairing view (`p` while the sidebar has focus; `Enter` on the Share button
-turns sharing off, so use `p` to inspect it) normally shows the bound address
+While sharing is active, checklist edits apply only on an explicit `[ Save ]`;
+`[ Cancel ]` leaves the effective share unchanged and discards the draft. A
+changed address or port requires a second confirmation: the terminal first
+binds and prepares the replacement while the old listener, keys and remote
+clients remain live, then publishes settings and commits the handover. A
+successful handover disconnects every old remote client and issues fresh long
+keys. If binding/preparation or settings publication fails, the old listener,
+keys and clients remain active and the draft stays available to correct.
+
+The Share page normally shows the bound address
 and two clearly labelled, distinct **sharing keys**: a human terminal key and an
 MCP/AI key. Each key is one long string that bundles the host certificate
-verification and that role's credential. Treat a key as a password: press `c` to ask the terminal to put the complete
-human key on its clipboard, or `C` for the MCP/AI key (OSC 52; Windows Terminal
-supports copy-through OSC 52 since 1.2). A terminal that ignores or disables
-that escape leaves the clipboard unchanged. In that case press `v` (human) or
-`V` (MCP/AI): the terminal shows the key as one logical line that it soft-wraps
-across rows. The terminal owns the mouse in this view, so dragging selects text
+verification and that role's credential. Treat a key as a password: activate the visible Copy button to ask the terminal to put the complete
+human key on its clipboard, or the MCP/AI Copy button for that key (OSC 52;
+Windows Terminal supports copy-through OSC 52 since 1.2). A terminal that
+ignores or disables that escape leaves the clipboard unchanged. In that case
+activate the matching Show key button: the terminal shows the key as one logical
+line that it soft-wraps across rows. The terminal owns the mouse in this view, so dragging selects text
 instead of moving the app's highlight; select that whole line and press any key
 to return. Terminals that mark wrapped rows (Windows Terminal, xterm, tmux) copy
 it without inserting line breaks. The pane must be tall enough to show the whole
-line: `v`/`V` refuse a shorter pane with a message instead of clipping the key,
-so enlarge the pane (or use `c`/`C` on a terminal with OSC 52) and try again.
-The pairing view's own rows are hard-wrapped, so selecting those adds line
-breaks and the receiving form refuses the result; use `c`/`C` or `v`/`V`
+line: Show key buttons refuse a shorter pane with a message instead of clipping the key,
+so enlarge the pane (or use a Copy button on a terminal with OSC 52) and try again.
+The Share page's own key rows are hard-wrapped, so selecting those adds line
+breaks and the receiving form refuses the result; use the Copy buttons or Show key buttons
 instead. Never put a key in a
 repository, issue, tool call or shell history. Keys are shown
 only to the owner, are never written to the settings file or a device, and stop
-working when sharing stops or restarts. Press `a` for the **older host fields**
+working when sharing stops or restarts. Its visible `[ Copy human key ]` and
+`[ Copy MCP/AI key ]` buttons ask the terminal to copy the complete string; the
+footer says the copy was requested, not that the terminal changed its
+clipboard. Activate the Advanced row for the **older host fields**
 (host name, the host certificate's SHA-256 fingerprint, the CA certificate and
-the two separate credentials) for a terminal that predates keys. Use `↑`/`↓`
-to scroll the long certificate.
+the two separate credentials) for a terminal that predates keys. `PageUp`/
+`PageDown` (or the mouse wheel) scrolls the long certificate; `↑`/`↓` move the
+form selection.
 
 While sharing is on, saving a checklist that unchecks a device tells the core
 to revoke it at once: remote clients on that device are detached and their
@@ -450,8 +475,9 @@ Unplugging a device, or replacing it with a different device at the same path,
 clears its checkbox; a replacement must be ticked again. The core's checked
 list is authoritative, never the UI's idea of it.
 
-Stopping sharing (`s` again, the Share button, or leaving the terminal) closes
-the listener, disconnects every remote client and revokes both credentials. A
+Stopping sharing (`[ Stop sharing ]` on the Share page, which asks for a second
+confirmation, or leaving the terminal) closes the listener, disconnects every
+remote client and revokes both credentials. A
 crashed terminal is noticed by the core when its owner connection closes, with
 the same effect. Restarting is off and creates fresh credentials.
 
@@ -469,17 +495,19 @@ do.
 
 ### Connecting to a shared host
 
-The sidebar's `[ Connect ]` button (or `c`) opens a form for the host address,
-port and **human sharing key**. Paste the whole key in one action (including a
-terminal bracketed paste) or type it. The terminal strictly checks the key's
+The sidebar's `[ Connect ]` button (or `c`) opens the Connect page for the host
+address, port and **human sharing key**; opening it never connects. Paste the
+whole key in one action (including a terminal bracketed paste) or type it. The terminal strictly checks the key's
 version, length, format and human role, refuses a key for a different host
 address, and verifies the host's certificate against the key's CA and pinned
 fingerprint before sending the credential. A malformed, wrong-role, wrong-host
 or stale key keeps the form open with a clear reason and never falls back to an
 unverified connection. The key and the rest of the form live only in memory:
-nothing is saved, logged or sent to a serial device. `Ctrl+A` switches the form
-to the older separate fields (CA certificate, fingerprint and human credential)
-for connecting to a host that predates keys.
+nothing is saved, logged or sent to a serial device. The visible `[ Connect ]`
+button starts the connection; `[ Clear key ]` (or `Ctrl+L`, or `Delete` in the
+key field) removes the complete key while keeping the address and port.
+`Ctrl+A` switches the form to the older separate fields (CA certificate,
+fingerprint and human credential) for connecting to a host that predates keys.
 
 After a successful pair, the connected host's approved devices appear in the
 sidebar under a `Remote <address:port>` heading (the local devices stay under
