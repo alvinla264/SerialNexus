@@ -2071,8 +2071,7 @@ impl Engine {
         // Revoke every requested device before any blocking serial cleanup, so
         // a stalled first device cannot delay authorization removal for later
         // ones. Local clients and other devices are untouched.
-        let removed = self.begin_detach_remote_clients(&revoked, "device was unshared", false);
-        self.finish_devices(removed);
+        self.detach_remote_clients(&revoked, &session, "device was unshared");
         Ok(ResponseData::Sharing(session.snapshot()))
     }
 
@@ -2197,8 +2196,12 @@ impl Engine {
         if had_remote {
             // Detach remotes and release their control before announcing the
             // expired instance, so no stale controller remains attached.
-            let removed =
-                self.begin_detach_remote_clients(&[device_id], "device is no longer shared", true);
+            let removed = self.begin_detach_remote_clients(
+                &[device_id],
+                session,
+                "device is no longer shared",
+                true,
+            );
             let removed_device = !removed.is_empty();
             self.cleanup_devices_async(removed);
             if !removed_device {
@@ -2293,7 +2296,11 @@ impl Engine {
                 let identity = match session.authorize(&params.port) {
                     Ok(identity) => identity,
                     Err(_) => {
-                        self.detach_remote_path(&params.port, "device is no longer shared");
+                        self.detach_remote_path(
+                            &params.port,
+                            &session,
+                            "device is no longer shared",
+                        );
                         return Err(Self::remote_denied());
                     }
                 };
@@ -2368,7 +2375,7 @@ impl Engine {
             // Expiry must revoke queued work even when the failing remote has
             // already detached; detach alone only bumps attached clients.
             self.revalidate_shared_instance(params.device_id, &session);
-            self.detach_remote_clients(&[params.device_id], "device is no longer shared");
+            self.detach_remote_clients(&[params.device_id], &session, "device is no longer shared");
             let _ = error;
             return Err(Self::remote_denied());
         }
@@ -2417,7 +2424,11 @@ impl Engine {
         ids
     }
 
-    fn detach_remote_path(&self, path: &str, reason: &str) {
+    fn detach_remote_path(&self, path: &str, session: &SharingSession, reason: &str) {
+        let _gate = self.share_gate.read().expect("share gate");
+        if session.is_stopped() {
+            return;
+        }
         let target = identity_path(path);
         let ids: Vec<u64> = self
             .state
@@ -2440,12 +2451,12 @@ impl Engine {
         if ids.is_empty() {
             return;
         }
-        if let Some(session) = self.sharing_session() {
-            for id in &ids {
-                self.revalidate_shared_instance(*id, &session);
-            }
+        for id in &ids {
+            self.revalidate_shared_instance_under_gate(*id, session);
         }
-        self.detach_remote_clients(&ids, reason);
+        let removed = self.begin_detach_remote_clients(&ids, session, reason, true);
+        drop(_gate);
+        self.finish_devices(removed);
     }
 
     fn remote_denied() -> ErrorBody {
@@ -2486,7 +2497,7 @@ impl Engine {
             Err(error) => {
                 // A changed device revokes access and fails remote work now.
                 self.revalidate_shared_instance(device_id, session);
-                self.detach_remote_clients(&[device_id], "device is no longer shared");
+                self.detach_remote_clients(&[device_id], session, "device is no longer shared");
                 Err(error)
             }
         }
@@ -2494,8 +2505,13 @@ impl Engine {
 
     /// Detach remote clients from these devices and fail their pending waits,
     /// leaving local clients and other shared devices alone.
-    fn detach_remote_clients(&self, device_ids: &[u64], reason: &str) {
-        let removed = self.begin_detach_remote_clients(device_ids, reason, false);
+    fn detach_remote_clients(&self, device_ids: &[u64], session: &SharingSession, reason: &str) {
+        let gate = self.share_gate.read().expect("share gate");
+        if session.is_stopped() {
+            return;
+        }
+        let removed = self.begin_detach_remote_clients(device_ids, session, reason, true);
+        drop(gate);
         self.finish_devices(removed);
     }
 
@@ -2505,16 +2521,21 @@ impl Engine {
     fn begin_detach_remote_clients(
         &self,
         device_ids: &[u64],
+        session: &SharingSession,
         reason: &str,
         share_gate_held: bool,
     ) -> Vec<Device> {
-        let session = self.sharing_session();
         let remote_ids: HashSet<u64> = self
             .clients
             .lock()
             .expect("clients lock")
             .iter()
-            .filter(|(_, record)| record.remote.is_some())
+            .filter(|(_, record)| {
+                record
+                    .remote
+                    .as_ref()
+                    .is_some_and(|active| std::ptr::eq(active.as_ref(), session))
+            })
             .map(|(id, _)| *id)
             .collect();
         if device_ids.is_empty() || remote_ids.is_empty() {
@@ -2581,7 +2602,7 @@ impl Engine {
                         *device_id,
                         reason,
                         &mut events,
-                        session.as_deref(),
+                        Some(session),
                     ) {
                         removed.push(device);
                     }
@@ -2979,6 +3000,89 @@ fn record_written_lines(device: &mut Device, source: Source, data: &[u8]) {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+
+    #[test]
+    fn retired_session_cleanup_cannot_detach_replacement_clients() {
+        let (shutdown_tx, _shutdown_rx) = unbounded();
+        let engine = Engine::new(CoreConfig::default(), PathBuf::new(), shutdown_tx);
+        let bind = serial_nexus_protocol::ShareBind::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+        );
+        let params = ShareStartParams {
+            bind,
+            devices: Vec::new(),
+            expected: Default::default(),
+        };
+        let old = share::prepare(1, &params, Vec::new(), ShareLimits::default())
+            .expect("old session")
+            .session;
+        let replacement = share::prepare(1, &params, Vec::new(), ShareLimits::default())
+            .expect("replacement session")
+            .session;
+        *engine.sharing.lock().expect("sharing lock") = Some(Arc::clone(&replacement));
+
+        let old_id = engine.register_remote_client(
+            unbounded().0,
+            Arc::clone(&old),
+            ClientKind::Human,
+            Some("old".into()),
+        );
+        let replacement_id = engine.register_remote_client(
+            unbounded().0,
+            Arc::clone(&replacement),
+            ClientKind::Human,
+            Some("replacement".into()),
+        );
+        let identity = DeviceIdentity::capture("/dev/null").expect("device identity");
+        let mut clients = BTreeMap::new();
+        clients.insert(
+            old_id,
+            Attached {
+                kind: ClientKind::Human,
+                name: Some("old".into()),
+            },
+        );
+        clients.insert(
+            replacement_id,
+            Attached {
+                kind: ClientKind::Human,
+                name: Some("replacement".into()),
+            },
+        );
+        engine.state.lock().expect("state lock").devices.insert(
+            1,
+            Device {
+                id: 1,
+                path: identity.canonical.clone(),
+                baud: 115_200,
+                history: History::new(10, 1024),
+                tail: Vec::new(),
+                tail_seq: None,
+                clients,
+                control: None,
+                write_tx: None,
+                write_epoch: Arc::new(AtomicU64::new(0)),
+                remote_queued: Arc::new(AtomicUsize::new(0)),
+                identity: identity.clone(),
+                shared: Some(identity),
+                stop: Arc::new(AtomicBool::new(false)),
+                waiters: Vec::new(),
+                io: None,
+            },
+        );
+
+        old.stop();
+        engine.detach_remote_clients(&[1], &old, "stale request");
+
+        let state = engine.state.lock().expect("state lock");
+        assert!(
+            state.devices[&1].clients.contains_key(&replacement_id),
+            "a retired session's cleanup must not detach replacement-session clients"
+        );
+        drop(state);
+        replacement.stop();
+    }
 
     #[test]
     fn an_expected_identity_rejects_a_replacement_node() {
