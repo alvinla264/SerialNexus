@@ -1,10 +1,10 @@
 //! The host container: a real terminal and core, sharing one simulated device.
 //!
 //! Everything that changes sharing is driven through the terminal's own UI —
-//! Settings' device checklist, the Save button, the sidebar's Share button,
-//! the pairing view's copy actions, and `Ctrl+Q` to quit — so the gate
-//! exercises the supported human path, not a private back door. The pairing
-//! keys are taken from the OSC 52 copy requests the terminal itself emits.
+//! Settings' device checklist, the Save button, the Share page's explicit
+//! start/stop/copy controls, and `Ctrl+Q` to quit — so the gate exercises the
+//! supported human path, not a private back door. Pairing keys are taken from
+//! the OSC 52 copy requests the terminal itself emits.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -243,17 +243,24 @@ fn wait_for_settings_applied(tui: &mut Tui) -> Result<(), String> {
 }
 
 fn start_sharing(tui: &mut Tui) -> Result<(), String> {
+    // The sidebar entry only opens the page. Starting a listener is a separate
+    // explicit action inside it.
     click_text(tui, "[ Share: off ]")?;
-    tui.wait_for_text("focus: pairing", STEP)?;
+    tui.wait_for_text("focus: share", STEP)?;
+    click_text(tui, "[ Start sharing ]")?;
     tui.wait_for_text("Human terminal key", STEP)
 }
 
 fn stop_sharing(tui: &mut Tui) -> Result<(), String> {
     click_text(tui, "[ Share: on ]")?;
+    tui.wait_for_text("focus: share", STEP)?;
+    click_text(tui, "[ Stop sharing ]")?;
+    tui.wait_for_text("[ Confirm stop ]", STEP)?;
+    click_text(tui, "[ Confirm stop ]")?;
     tui.wait_for_text("sharing stopped", STEP)
 }
 
-/// Wait for the pairing view's bound endpoint, copy both keys from the
+/// Wait for the Share page's bound endpoint, copy both keys from the
 /// terminal's own OSC 52 requests, and write one private announcement.
 fn announce(
     tui: &mut Tui,
@@ -262,10 +269,10 @@ fn announce(
 ) -> Result<(SocketAddr, (String, String)), String> {
     let bind = wait_for_bind(tui)?;
     let transcript = tui.raw_transcript().len();
-    tui.send_text("c")?;
+    click_text(tui, "[ Copy human key ]")?;
     let human = wait_for_copied_key(tui, "snx1.human.", transcript)?;
     let transcript = tui.raw_transcript().len();
-    tui.send_text("C")?;
+    click_text(tui, "[ Copy MCP/AI key ]")?;
     let ai = wait_for_copied_key(tui, "snx1.ai.", transcript)?;
 
     // Validate before publishing: a key the production parser would reject
@@ -283,7 +290,6 @@ fn announce(
     };
     let bytes = serde_json::to_vec(&announcement).map_err(|error| error.to_string())?;
     write_private(&announcement_path(state, generation), &bytes).map_err(io_error)?;
-    tui.send_text("x")?;
     tui.wait_for_text("Human terminal key", STEP)?;
     Ok((bind, (human, ai)))
 }
@@ -295,13 +301,13 @@ fn wait_for_bind(tui: &mut Tui) -> Result<SocketAddr, String> {
             return Ok(bind);
         }
         if Instant::now() >= deadline {
-            return Err("the pairing view never showed the bound endpoint".to_string());
+            return Err("the Share page never showed the bound endpoint".to_string());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// The pairing view's first line is `Sharing on <address>:<port> · …`.
+/// The Share page's first line is `Sharing on <address>:<port> · …`.
 fn parse_bind(text: &str) -> Option<SocketAddr> {
     let line = text.lines().find(|line| line.contains("Sharing on "))?;
     let rest = line.split_once("Sharing on ")?.1;
@@ -357,10 +363,10 @@ fn wait_for_copied_key(tui: &mut Tui, prefix: &str, since: usize) -> Result<Stri
     }
 }
 
-/// Leave the pairing view for the live stream, so the sidebar's buttons and
+/// Leave the Share page for the live stream, so the sidebar's buttons and
 /// the settings checklist are the next things clicked.
-fn leave_pairing(tui: &mut Tui) -> Result<(), String> {
-    if tui.text().contains("focus: pairing") {
+fn leave_share_page(tui: &mut Tui) -> Result<(), String> {
+    if tui.text().contains("focus: share") {
         tui.send(KEY_ESC)?;
         tui.wait_until("the live stream", STEP, |text| {
             text.contains("focus: stream")
@@ -370,7 +376,7 @@ fn leave_pairing(tui: &mut Tui) -> Result<(), String> {
 }
 
 fn uncheck_device(tui: &mut Tui, path: &str) -> Result<Option<String>, String> {
-    leave_pairing(tui)?;
+    leave_share_page(tui)?;
     focus(tui, "sidebar")?;
     open_settings(tui)?;
     set_device_checked(tui, path, false)?;
@@ -382,10 +388,10 @@ fn uncheck_device(tui: &mut Tui, path: &str) -> Result<Option<String>, String> {
 }
 
 fn rotate(tui: &mut Tui, state: &Path, path: &str) -> Result<Option<String>, String> {
-    // The sharing view is still open from session 1. Leave it, stop the
+    // The Share page is still open from session 1. Leave it, stop the
     // session (fresh CA, leaf and credentials next time), re-check the device
     // and start again.
-    leave_pairing(tui)?;
+    leave_share_page(tui)?;
     focus(tui, "sidebar")?;
     stop_sharing(tui)?;
     tui.wait_for_text("[ Share: off ]", STEP)?;
@@ -402,8 +408,8 @@ fn rotate(tui: &mut Tui, state: &Path, path: &str) -> Result<Option<String>, Str
 }
 
 fn quit(tui: &mut Tui, state: &Path) -> Result<Option<String>, String> {
-    // Leave the pairing view and quit through the terminal's cleanup path.
-    leave_pairing(tui)?;
+    // Leave the Share page and quit through the terminal's cleanup path.
+    leave_share_page(tui)?;
     focus(tui, "sidebar")?;
     tui.send(KEY_CTRL_Q)?;
     let status = tui.wait_exit(Duration::from_secs(15))?;

@@ -148,10 +148,6 @@ impl Tui {
             .map_err(|error| format!("cannot type into the terminal: {error}"))
     }
 
-    pub fn send_text(&mut self, text: &str) -> Result<(), String> {
-        self.send(text.as_bytes())
-    }
-
     /// A left click at a zero-based screen cell, as SGR mouse reporting.
     pub fn click(&mut self, column: u16, row: u16) -> Result<(), String> {
         self.send(
