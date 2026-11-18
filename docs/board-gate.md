@@ -99,17 +99,18 @@ hardware. On the coordinator's machine:
    key** and a distinct **MCP/AI key**, both starting `snx1.`, plus visible
    `[ Copy human key ]` and `[ Copy MCP/AI key ]` buttons. Activate the Advanced row and confirm
    the older host fields (host name, `certificate SHA-256`, CA and two raw
-   credentials) are still shown; activate the Advanced row again. Stop with `[ Stop sharing ]`
-   and confirm the second, explicit confirmation.
+   credentials) are still shown; activate the Advanced row again. Keep sharing
+   on for the remote pairing and connection below.
 2. Start a second `serial-nexus-terminal` on another machine (or another
    user's session). `[ Connect ]`, type the host address and port, then paste
    the whole **human key** in one action and press Enter. Confirm the board
    appears under `Remote <address:port>`, open it and read real firmware
    output. This proves the normal key path, strict role/host checks, TLS CA,
    name and pin verification, and the selected-device ACL.
-3. On the host, stop and restart sharing. In the second terminal, try the same
-   old human key again: it must fail clearly and must not print the key or
-   fall back to an unverified connection. Pair with the new key.
+3. After the successful connection, stop and restart sharing on the host. In
+   the second terminal, try the same old human key again: it must fail clearly
+   and must not print the key or fall back to an unverified connection. Obtain
+   the newly issued human key from the host and pair with it.
 4. In the host terminal's sidebar press `m`, enter the address, port and the
    host's new **MCP/AI key**, and press Enter. Confirm the terminal says the
    MCP pairing was saved and that `~/.config/serial-nexus/mcp-peers.json` is

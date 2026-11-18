@@ -1470,31 +1470,57 @@ fn connect_layout(state: &AppState, right: Rect) -> Option<ConnectLayout> {
     if right.height < 1 || right.width < 12 {
         return None;
     }
-    let hints_height = if right.height >= 6 { 1 } else { 0 };
-    let title_height = if right.height >= 4 { 1 } else { 0 };
+    let mut hints_height = if right.height >= 8 { 1 } else { 0 };
+    let mut title_height = if right.height >= 4 { 1 } else { 0 };
     // The action bar never clips a control: one row when it fits, then two,
     // then one full-width row per button on a genuinely narrow pane.
     let bar_height = if right.height >= 5 {
-        let rows = if right.width >= CONNECT_ACTIONS_ROW.len() as u16 {
+        if right.width >= CONNECT_ACTIONS_ROW.len() as u16 {
             1
         } else if right.width >= 38 {
             2
         } else {
             4
-        };
-        rows.min(right.height.saturating_sub(1))
+        }
     } else {
         0
     };
-    let error_height = u16::from(
+    let mut error_height = u16::from(
         state
             .connect
             .as_ref()
             .is_some_and(|form| form.error.is_some())
             && right.height >= 2,
     );
-    let reserved = title_height + bar_height + hints_height + error_height;
-    let fields_height = right.height.saturating_sub(reserved).max(1);
+    let mut fields_height = right
+        .height
+        .saturating_sub(title_height + bar_height + hints_height + error_height);
+    // On very short panes preserve the action controls and at least one field;
+    // optional chrome yields before the form is allowed to draw past its area.
+    if fields_height == 0 && title_height > 0 {
+        title_height = 0;
+        fields_height = right
+            .height
+            .saturating_sub(title_height + bar_height + hints_height + error_height);
+    }
+    if fields_height == 0 && hints_height > 0 {
+        hints_height = 0;
+        fields_height = right
+            .height
+            .saturating_sub(title_height + bar_height + hints_height + error_height);
+    }
+    if fields_height == 0 && error_height > 0 {
+        error_height = 0;
+        fields_height = right
+            .height
+            .saturating_sub(title_height + bar_height + hints_height + error_height);
+    }
+    if fields_height == 0 && bar_height > 0 {
+        // No safe click layout fits in this height; leave keyboard submit and
+        // field navigation active without drawing an overflowing action bar.
+        fields_height = 1;
+    }
+    fields_height = fields_height.max(1);
     let title = Rect::new(right.x, right.y, right.width, title_height);
     let fields = Rect::new(right.x, right.y + title_height, right.width, fields_height);
     let error = (error_height > 0).then(|| {
@@ -3101,7 +3127,7 @@ mod tests {
     }
 
     #[test]
-    fn an_81_column_connect_page_does_not_clip_the_single_row_action_bar() {
+    fn an_80_column_connect_page_does_not_clip_the_single_row_action_bar() {
         let mut state = demo();
         state.connect = Some(ConnectForm::new());
         state.view = View::Connect;
@@ -3114,6 +3140,32 @@ mod tests {
                 .any(|line| line.contains("[ Older ") && !line.contains("[ Older fields ]")),
             "the label is not clipped:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_compact_connect_validation_error_does_not_overwrite_action_controls() {
+        let mut state = demo();
+        let mut form = ConnectForm::new();
+        form.error = Some("enter a host address".into());
+        state.connect = Some(form);
+        state.view = View::Connect;
+        state.focus = Focus::Right;
+
+        for (width, height) in [(27, 10), (27, 9)] {
+            let text = screen(&state, width, height).join("\n");
+            for label in [
+                "[ Connect ]",
+                "[ Clear key ]",
+                "[ Cancel ]",
+                "[ Older fields ]",
+                "enter a host address",
+            ] {
+                assert!(
+                    text.contains(label),
+                    "{label} missing at {width}x{height}:\n{text}"
+                );
+            }
+        }
     }
 
     #[test]
