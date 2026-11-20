@@ -1,0 +1,55 @@
+name: Docker LAN gate
+
+# The Docker LAN gate is the repository's real two-container integration test,
+# promoted from a manual procedure to a visible check (docs/lan-docker.md).
+# It runs on ephemeral GitHub-hosted runners only, so untrusted pull-request
+# code never reaches a persistent or self-hosted daemon. It is deliberately not
+# a required status check, and it does not replace the physical STM32 board
+# gate or prove a real LAN, firewall or USB serial hardware.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per branch or pull request, like ci.yml: a new push makes the
+# previous gate obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the job only checks out the event revision and talks to its
+# own runner's Docker daemon. No secret and no write scope, so a pull request
+# from a fork gets GitHub's read-only token and cannot reach repository
+# secrets.
+permissions:
+  contents: read
+
+jobs:
+  lan-docker:
+    # A stable check name, so it can be cited in documentation and later made
+    # required without renaming anything.
+    name: sh scripts/lan-docker/run.sh
+    runs-on: ubuntu-latest
+    # The gate's own documented phase timeouts are 1800 s build, 120 s start,
+    # 420 s client and 30 s shutdown (2370 s in total); Docker-side cleanup
+    # adds a couple of minutes. 45 minutes bounds the whole job with headroom
+    # and still kills a hung run instead of holding a runner. The workflow
+    # contract test fails if this bound stops covering those documented limits.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The gate never pushes; keep the job token out of .git/config.
+          persist-credentials: false
+      - name: Show the runner's Docker daemon
+        run: docker version
+      - name: Gate orchestration harness (stub Docker, no daemon)
+        run: sh scripts/lan-docker/tests/run-tests.sh
+      - name: Workflow contract (triggers, permissions, timeout)
+        run: sh scripts/lan-docker/tests/workflow-tests.sh
+      # The real gate: a cold image build from the pinned digests, two isolated
+      # containers and real TLS assertions, then the orchestrator's own
+      # cleanup. No options, no mock, no --keep. A non-zero exit fails the job.
+      - name: Docker LAN gate (real image, two containers, real TLS)
+        run: sh scripts/lan-docker/run.sh

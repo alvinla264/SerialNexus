@@ -204,9 +204,10 @@ LAN sharing and remote-client terms (the core contract is in
 - **Remote session**: one MCP server's connection to one remote endpoint, with
   its own device ids, control and history, separate from the local core and
   every other endpoint.
-- **Docker LAN gate**: the opt-in test that runs a real host terminal and core
-  beside real remote clients in two separate containers on a private internal
-  bridge network, with a container-local PTY published through production
+- **Docker LAN gate**: the test that runs a real host terminal and core beside
+  real remote clients in two separate containers on a private internal bridge
+  network, with a container-local PTY published through production
   `/dev/serial/by-id` discovery. It proves the software LAN path without a
-  board or a real LAN; it is not CI and does not replace the **board gate**
-  (real hardware and real LAN).
+  board or a real LAN; it runs locally and as a visible, non-required GitHub
+  Actions check on GitHub-hosted runners, and it does not replace the
+  **board gate** (real hardware and real LAN).

@@ -1,14 +1,12 @@
 # Docker LAN gate: two separate containers, real TLS
 
-The Docker LAN gate is an **opt-in** integration test that runs a real
-SerialNexus host and real remote clients in two separate Linux containers on a
-private bridge network. It needs no STM32, no serial adapter and no host
-device. It does not replace the [board gate](board-gate.md), and it does not
-replace testing on two real machines behind a real firewall: it proves the
-software path, not a network's behaviour.
-
-Nothing in CI runs it. The CI workflow and the physical STM32 gate are
-unchanged.
+The Docker LAN gate is an integration test that runs a real SerialNexus host
+and real remote clients in two separate Linux containers on a private bridge
+network. It needs no STM32, no serial adapter and no host device. It runs as
+its own GitHub Actions job (see [CI](#ci)) and on demand from a clone. It does
+not replace the [board gate](board-gate.md), and it does not replace testing on
+two real machines behind a real firewall: it proves the software path, not a
+network's behaviour.
 
 ## What it proves
 
@@ -140,6 +138,42 @@ Timeouts, all overridable by environment variable:
 A cached build takes about half a minute; a cold build (pulling the pinned
 images) a few minutes. A passing run normally takes under a minute.
 
+## CI
+
+[`.github/workflows/lan-docker.yml`](../.github/workflows/lan-docker.yml) runs
+the same command as the job `sh scripts/lan-docker/run.sh` on a GitHub-hosted
+`ubuntu-latest` runner:
+
+- it runs on every `pull_request`, on every push to `main`, and on manual
+  `workflow_dispatch` (Actions → Docker LAN gate → Run workflow);
+- it checks out the event revision and runs
+  `sh scripts/lan-docker/run.sh` with no options: a real cold image build from
+  the pinned digests, the two isolated containers and the real TLS assertions,
+  then the orchestrator's own cleanup. The gate is not mocked, not `--keep`
+  and not a prebuilt image, so the job cannot test a stale binary;
+- the job fails when the build, any assertion, the cleanup or a phase timeout
+  fails, exactly as the command does locally;
+- its token is read-only (`permissions: contents: read`), it uses no secret, it
+  never uses `pull_request_target`, and it runs on ephemeral GitHub-hosted
+  runners, so untrusted pull-request code never reaches a persistent or
+  self-hosted daemon;
+- the job is bounded to 45 minutes, which covers the documented phase timeouts
+  (2370 s) plus Docker-side cleanup. A hung run is killed and fails the job;
+- the check is visible on pull requests but is **not a required status check**;
+  branch protection is unchanged. Making it required is a separate decision
+  once its runtime is known.
+
+The workflow also runs `scripts/lan-docker/tests/run-tests.sh` (the stub-Docker
+orchestration harness) and `scripts/lan-docker/tests/workflow-tests.sh` (the
+trigger, least-privilege, timeout and exact-command contract for this workflow
+and the six checks in `ci.yml`) before the real gate.
+
+CI proves the Actions-hosted Linux path only. It does not prove a real LAN,
+firewall, NAT or USB serial hardware, and it does not replace the board gate.
+The job log is the gate's own sanitized output: the gate never prints pairing
+keys, and a finished job keeps only the runner's ephemeral log, because the
+orchestrator removed the containers, network, volume and image it created.
+
 ## Isolation
 
 The orchestrator creates, and cleans up:
@@ -212,6 +246,24 @@ ownership of existing and raced resource names, daemon DNS and generic API
 errors during cleanup, diagnostics redaction,
 `--keep` on success and failure, and the digest pins. They also assert that no privileged,
 published, host-network or device-mapped container is ever created.
+
+The CI workflow's own contract is tested without network or Docker:
+
+```sh
+sh scripts/lan-docker/tests/workflow-tests.sh
+```
+
+It fails if the `on:` block stops being exactly `pull_request`, `push` to
+`main` and `workflow_dispatch` (so an added `schedule`, a narrowing
+`types: [closed]`, or an ignored branch/path list is caught), uses
+`pull_request_target`, gains a write scope, a secret, a self-hosted runner or a
+`paths` filter, stops naming the job after the command, stops running the exact
+whole command line with no options and no shell operator that could mask its
+exit status (`--help`, `|| :` and a `bash -c` wrapper are caught), gains
+`continue-on-error` or an `if:` skip, overrides the checkout revision
+(`ref`/`repository`) or persists the token, or if its timeout stops covering
+the timeouts documented above. It also pins the six existing `ci.yml` checks,
+so adding this workflow cannot quietly drop or rename one.
 
 ## Cleanup and troubleshooting
 
