@@ -50,6 +50,13 @@ is its own job, named after the command it runs, so a pull request shows:
 The tests and the release build run on both, so the declared minimum is checked
 rather than assumed.
 
+A separate workflow, [`.github/workflows/lan-docker.yml`](../.github/workflows/lan-docker.yml),
+runs the [Docker LAN gate](lan-docker.md) as the visible check
+`sh scripts/lan-docker/run.sh` on an ephemeral GitHub-hosted Linux runner, on
+pull requests, on pushes to `main` and on manual `workflow_dispatch`. It is not
+a required status check: branch protection does not wait on it, and it does not
+replace the board gate.
+
 Packaging:
 
 ```sh
@@ -190,11 +197,12 @@ board, but the sharing path between two physical computers has not been
 verified. PTY fixtures are not enumerated, so sharing tests open them locally
 first; real enumerated devices need not be open locally.
 
-The opt-in [Docker LAN gate](lan-docker.md) closes the loopback gap: it runs a
+The [Docker LAN gate](lan-docker.md) closes the loopback gap: it runs a
 real host terminal and core beside real remote clients (the production remote
 adapter and the real MCP server) in two separate containers on a private
 internal bridge network, with a container-local PTY device published through
-production's `/dev/serial/by-id` discovery. It is not part of CI:
-`sh scripts/lan-docker/run.sh`. It still does not exercise a real firewall, a
-real LAN or USB serial hardware; the [board gate](board-gate.md) remains the
-real-hardware acceptance procedure.
+production's `/dev/serial/by-id` discovery. It runs locally with
+`sh scripts/lan-docker/run.sh` and as a GitHub Actions check on a GitHub-hosted
+runner (not required by branch protection). It still does not exercise a real
+firewall, a real LAN or USB serial hardware; the [board gate](board-gate.md)
+remains the real-hardware acceptance procedure.

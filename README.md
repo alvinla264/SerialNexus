@@ -121,7 +121,7 @@ for control, history, and lifecycle details.
 - [Client library, human terminal, LAN sharing and MCP server](docs/clients.md)
 - [Security, building, and testing](docs/development.md)
 - [LAN sharing internal contract](docs/sharing.md)
-- [Docker LAN gate: two containers, real TLS (opt-in)](docs/lan-docker.md)
+- [Docker LAN gate: two containers, real TLS](docs/lan-docker.md)
 - [Draft v0.1.0 release notes](docs/release-notes-v0.1.md)
 - [Security policy and private reporting](SECURITY.md)
 - [MCP tool reference](crates/serial-nexus-mcp/README.md)
