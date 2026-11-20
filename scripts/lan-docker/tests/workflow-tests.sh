@@ -44,19 +44,30 @@ sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$ci" >"$ci_clean"
 
 hline() { grep -Fxq -- "$1" "$2" >/dev/null 2>&1; }
 has() { grep -Fq -- "$1" "$2" >/dev/null 2>&1; }
-count() { grep -Fc -- "$1" "$2" 2>/dev/null || true; }
+count_exact() { grep -Fxc -- "$1" "$2" 2>/dev/null || true; }
 
 show() { sed 's/^/    /' "$1"; }
 
-# 1. Triggers: pull requests, main pushes and manual dispatch only.
-if hline 'on:' "$clean" &&
-    hline '  pull_request:' "$clean" &&
-    hline '  push:' "$clean" &&
-    hline '    branches: [main]' "$clean" &&
-    hline '  workflow_dispatch:' "$clean"; then
-    pass "the gate runs on pull_request, push to main and workflow_dispatch"
+# 1. Triggers: exactly the approved events. Comparing the whole `on:` block,
+#    rather than looking for keys, catches an added event (a `schedule`), a
+#    narrowing input (`types: [closed]`) and an ignored branch or path list.
+cat >"$work/on.expected" <<'ON'
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+ON
+awk '
+    /^on:$/ { inside = 1; print; next }
+    inside && /^[[:space:]]*$/ { next }
+    inside && /^[^[:space:]]/ { exit }
+    inside { print }
+' "$clean" >"$work/on.actual"
+if diff -u "$work/on.expected" "$work/on.actual" >"$work/on.diff" 2>&1; then
+    pass "the workflow triggers on exactly pull_request, push to main and workflow_dispatch"
 else
-    failed "the gate runs on pull_request, push to main and workflow_dispatch" "$(show "$clean")"
+    failed "the workflow triggers on exactly pull_request, push to main and workflow_dispatch" "$(show "$work/on.diff")"
 fi
 
 # 2. Never pull_request_target: that would give untrusted fork code a writable
@@ -121,15 +132,19 @@ else
         "documented limit sum: ${sum}s (${needed} min); job timeout: '${job_timeout}'; missing:${missing_timeouts:- none}"
 fi
 
-# 8. Exactly the real gate command, once, with no options and no mock.
-gate_runs=$(count '        run: sh scripts/lan-docker/run.sh' "$clean")
+# 8. Exactly the real gate command, on one whole line, with no options and no
+#    shell operator that could mask its exit status.
+#    `grep -Fx` (not a substring match) is what rejects `--help`, `|| :` and a
+#    rewritten `bash -c` wrapper.
+gate_runs=$(count_exact '        run: sh scripts/lan-docker/run.sh' "$clean")
 if [ "$gate_runs" = "1" ] &&
     ! has '--keep' "$clean" &&
     ! has '--image' "$clean" &&
-    ! has '--pull' "$clean"; then
-    pass "the job runs exactly 'sh scripts/lan-docker/run.sh' with no options"
+    ! has '--pull' "$clean" &&
+    ! grep -Eq '^[[:space:]]*run: .*(\|\||;|&&)' "$clean"; then
+    pass "the job runs exactly 'sh scripts/lan-docker/run.sh' with no options or masking"
 else
-    failed "the job runs exactly 'sh scripts/lan-docker/run.sh' with no options" \
+    failed "the job runs exactly 'sh scripts/lan-docker/run.sh' with no options or masking" \
         "matching run lines: ${gate_runs:-0}
 $(show "$clean")"
 fi
@@ -141,12 +156,14 @@ else
     failed "a failing build, assertion, cleanup or timeout fails the job" "$(show "$clean")"
 fi
 
-# 10. Checkout is pinned to a release commit and leaves no credentials behind.
+# 10. Checkout is pinned to a release commit, uses the event revision (no
+#     `ref`/`repository` override) and leaves no credentials behind.
 if [ "$(sed -n 's/^      - uses: actions\/checkout@[0-9a-f]\{40\}$/checkout/p' "$clean" | grep -c checkout)" = "1" ] &&
+    ! grep -Eq '^[[:space:]]+(ref|repository|token|fetch-depth):' "$clean" &&
     hline '          persist-credentials: false' "$clean"; then
-    pass "checkout is pinned by commit and does not persist the token"
+    pass "checkout is pinned by commit, uses the event revision and keeps no token"
 else
-    failed "checkout is pinned by commit and does not persist the token" "$(show "$clean")"
+    failed "checkout is pinned by commit, uses the event revision and keeps no token" "$(show "$clean")"
 fi
 
 # 11. The six existing checks keep their jobs, names and triggers in ci.yml:
@@ -162,7 +179,7 @@ if hline '  pull_request:' "$ci_clean" &&
     hline '    name: cargo clippy --workspace --all-targets -- -D warnings' "$ci_clean" &&
     hline "    name: cargo test --workspace (\${{ matrix.toolchain }})" "$ci_clean" &&
     hline "    name: cargo build --workspace --release (\${{ matrix.toolchain }})" "$ci_clean" &&
-    [ "$(count '        toolchain: [stable, 1.85.0]' "$ci_clean")" = "2" ]; then
+    [ "$(count_exact '        toolchain: [stable, 1.85.0]' "$ci_clean")" = "2" ]; then
     pass "ci.yml still declares the six existing checks and their triggers"
 else
     failed "ci.yml still declares the six existing checks and their triggers" "$(show "$ci_clean")"

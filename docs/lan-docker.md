@@ -253,14 +253,17 @@ The CI workflow's own contract is tested without network or Docker:
 sh scripts/lan-docker/tests/workflow-tests.sh
 ```
 
-It fails if the workflow loses or adds a trigger (`pull_request` from a fork,
-`push` to `main`, `workflow_dispatch`), uses `pull_request_target`, gains a
-write scope, a secret, a self-hosted runner or a `paths` filter, stops naming
-the job after the command, stops running the exact command with no `--keep`,
-`--image` or `--pull`, gains `continue-on-error`, `|| true` or an `if:` skip on
-the gate, loses its pinned checkout, or if its timeout stops covering the
-timeouts documented above. It also pins the six existing `ci.yml` checks, so
-adding this workflow cannot quietly drop or rename one.
+It fails if the `on:` block stops being exactly `pull_request`, `push` to
+`main` and `workflow_dispatch` (so an added `schedule`, a narrowing
+`types: [closed]`, or an ignored branch/path list is caught), uses
+`pull_request_target`, gains a write scope, a secret, a self-hosted runner or a
+`paths` filter, stops naming the job after the command, stops running the exact
+whole command line with no options and no shell operator that could mask its
+exit status (`--help`, `|| :` and a `bash -c` wrapper are caught), gains
+`continue-on-error` or an `if:` skip, overrides the checkout revision
+(`ref`/`repository`) or persists the token, or if its timeout stops covering
+the timeouts documented above. It also pins the six existing `ci.yml` checks,
+so adding this workflow cannot quietly drop or rename one.
 
 ## Cleanup and troubleshooting
 
