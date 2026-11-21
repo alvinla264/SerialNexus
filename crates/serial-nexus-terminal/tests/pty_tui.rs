@@ -567,11 +567,11 @@ fn settings_open_on_the_right_and_mouse_and_keyboard_save_and_cancel_work() {
         tui.text().contains("Devices ("),
         "the sidebar stays visible"
     );
-    assert!(flag_is(&tui, "Local echo", "on"));
+    assert!(flag_is(&tui, "Local echo", "off"), "local echo starts off");
 
     // A keyboard toggle, kept through a narrow resize and back.
     tui.send_text(" ");
-    wait_flag(&mut tui, "Local echo", "off");
+    wait_flag(&mut tui, "Local echo", "on");
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: sidebar");
     tui.resize(20, 40);
@@ -582,9 +582,9 @@ fn settings_open_on_the_right_and_mouse_and_keyboard_save_and_cancel_work() {
     tui.wait_until("both panes again", |text| text.contains('│'));
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: settings");
-    wait_flag(&mut tui, "Local echo", "off");
+    wait_flag(&mut tui, "Local echo", "on");
     assert!(
-        flag_is(&tui, "Local echo", "off"),
+        flag_is(&tui, "Local echo", "on"),
         "the draft survives a resize"
     );
 
@@ -593,12 +593,12 @@ fn settings_open_on_the_right_and_mouse_and_keyboard_save_and_cancel_work() {
     wait_for_notice(&mut tui, "settings saved");
     tui.wait_for_text("focus: stream");
     let saved = fixture.settings();
-    assert!(saved.contains("\"local_echo\": false"), "{saved}");
+    assert!(saved.contains("\"local_echo\": true"), "{saved}");
 
     // Reopen, change scrollback, and Cancel with the mouse: nothing is saved.
     tui.click(3, tui.rows() - 3);
     tui.wait_for_text("focus: settings");
-    wait_flag(&mut tui, "Local echo", "off");
+    wait_flag(&mut tui, "Local echo", "on");
     tui.send(KEY_DOWN);
     tui.send_text(" ");
     wait_flag(&mut tui, "Scrollback", "off");
@@ -606,15 +606,15 @@ fn settings_open_on_the_right_and_mouse_and_keyboard_save_and_cancel_work() {
     tui.wait_for_text("focus: stream");
     assert_eq!(fixture.settings(), saved, "Cancel keeps the file");
 
-    // Reopen, turn local echo back on, and Save with the mouse.
+    // Reopen, turn local echo back off, and Save with the mouse.
     tui.click(3, tui.rows() - 3);
     tui.wait_for_text("focus: settings");
     tui.send_text(" ");
-    wait_flag(&mut tui, "Local echo", "on");
+    wait_flag(&mut tui, "Local echo", "off");
     click_button(&mut tui, "[ Save ]");
     wait_for_notice(&mut tui, "settings saved");
     tui.wait_for_text("focus: stream");
-    assert!(fixture.settings().contains("\"local_echo\": true"));
+    assert!(fixture.settings().contains("\"local_echo\": false"));
 }
 
 #[test]
@@ -634,7 +634,7 @@ fn a_failed_save_does_not_apply_and_a_dirty_draft_blocks_opening() {
     tui.click(3, tui.rows() - 3);
     tui.wait_for_text("focus: settings");
     tui.send_text(" ");
-    wait_flag(&mut tui, "Local echo", "off");
+    wait_flag(&mut tui, "Local echo", "on");
     tui.send(KEY_CTRL_S);
     tui.wait_for_text("settings not saved");
     assert!(
@@ -642,20 +642,30 @@ fn a_failed_save_does_not_apply_and_a_dirty_draft_blocks_opening() {
         "a failed save stays on the page:\n{}",
         tui.text()
     );
-    assert!(flag_is(&tui, "Local echo", "off"), "the draft is kept");
+    assert!(flag_is(&tui, "Local echo", "on"), "the draft is kept");
 
-    // The option in effect did not change: typed keys are still echoed.
+    // The option in effect did not change: it is still off by default, so
+    // typed keys reach the device but are not drawn. Device output after them
+    // is the render barrier that makes the absence meaningful.
     tui.send(KEY_ESC);
     tui.wait_for_text("focus: stream");
     tui.send_text("ZZZ");
     fixture.first.read_until(b"ZZZ", STEP);
-    tui.wait_for_text("ZZZ");
+    fixture.first.write(b"failed-save-barrier\r\n");
+    tui.wait_for_text("failed-save-barrier");
+    assert!(
+        !tui.text().contains("ZZZ"),
+        "a failed save never applies the draft:\n{}",
+        tui.text()
+    );
 
-    // A dirty draft refuses opening a device and is kept.
+    // A dirty draft refuses opening a device and is kept. Reopening the
+    // settings starts from the option in effect, which is still off.
     tui.click(3, tui.rows() - 3);
     tui.wait_for_text("focus: settings");
-    tui.send_text(" ");
     wait_flag(&mut tui, "Local echo", "off");
+    tui.send_text(" ");
+    wait_flag(&mut tui, "Local echo", "on");
     tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: sidebar");
     let row = device_row(&tui, &first_path);
@@ -667,7 +677,7 @@ fn a_failed_save_does_not_apply_and_a_dirty_draft_blocks_opening() {
         "the settings and the draft are still shown:\n{}",
         tui.text()
     );
-    assert!(flag_is(&tui, "Local echo", "off"), "the draft is unchanged");
+    assert!(flag_is(&tui, "Local echo", "on"), "the draft is unchanged");
 }
 
 #[test]
@@ -764,6 +774,9 @@ fn stream_keys_ai_output_local_echo_and_scrollback_off_are_visible() {
         .expect("the AI joins the open device");
     ai.write_bytes(opened.device_id, b"from-the-ai\r\n", None)
         .expect("AI write");
+    // Drain the device side too, so the read after typing below is the
+    // human's keys and not this queued AI write.
+    fixture.first.read_until(b"from-the-ai", STEP);
     tui.wait_for_text("from-the-ai");
     tui.wait_for_text("AI: pty-ai");
 
@@ -783,14 +796,10 @@ fn stream_keys_ai_output_local_echo_and_scrollback_off_are_visible() {
     tui.send_text("b");
     tui.wait_for_text("scrollback is off");
 
-    // Local echo off: typed keys reach the device but are not drawn, while
-    // the device's own output is.
-    tui.click(3, tui.rows() - 3);
-    tui.wait_for_text("focus: settings");
-    tui.send_text(" ");
-    wait_flag(&mut tui, "Local echo", "off");
-    tui.send(KEY_CTRL_S);
-    tui.wait_for_text("settings saved");
+    // Local echo is off by default: typed keys reach the device but are not
+    // drawn, while the device's own output is. The refusal above left the
+    // sidebar focused, so focus the stream before typing.
+    tui.send(KEY_CTRL_BRACKET);
     tui.wait_for_text("focus: stream");
     tui.send_text("WWW");
     fixture.first.read_until(b"WWW", STEP);

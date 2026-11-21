@@ -2406,7 +2406,7 @@ mod tests {
         state.add_session(7, "/dev/a", 115_200, None);
         state.add_session(8, "/dev/b", 115_200, None);
         state.begin_settings();
-        state.draft.local_echo = false;
+        state.draft.local_echo = true;
 
         state.apply_event(&Event::DeviceClosed {
             device_id: 8,
@@ -2420,7 +2420,7 @@ mod tests {
             "the other attached session takes the right pane"
         );
         assert_eq!(state.view, View::Settings, "the settings stay open");
-        assert!(!state.draft.local_echo, "the draft is kept");
+        assert!(state.draft.local_echo, "the draft is kept");
         let notice = state.notice.as_ref().expect("the disconnect is reported");
         assert!(notice.text.contains("unplugged"), "{}", notice.text);
     }
@@ -2530,7 +2530,7 @@ mod tests {
         state.set_devices(devices(&["/dev/a", "/dev/b"]));
         state.select_index(1);
         state.begin_settings();
-        state.draft.local_echo = false;
+        state.draft.local_echo = true;
 
         state.cancel_settings();
         assert_eq!(state.view, View::Stream);
@@ -2543,7 +2543,7 @@ mod tests {
         assert_eq!(state.selected_device().unwrap().path, "/dev/b");
 
         state.begin_settings();
-        state.draft.local_echo = false;
+        state.draft.local_echo = true;
         state.commit_settings();
         assert_eq!(state.view, View::Stream);
         assert_eq!(state.shown_session().unwrap().device_id, 7);
@@ -2553,9 +2553,9 @@ mod tests {
     fn reopening_the_open_settings_keeps_the_draft() {
         let mut state = AppState::new(10, 80);
         state.begin_settings();
-        state.draft.local_echo = false;
+        state.draft.local_echo = true;
         state.begin_settings();
-        assert!(!state.draft.local_echo, "the unsaved draft is kept");
+        assert!(state.draft.local_echo, "the unsaved draft is kept");
         assert_eq!(state.view, View::Settings);
     }
 
@@ -2565,7 +2565,7 @@ mod tests {
         assert!(!state.has_unsaved_settings());
         state.begin_settings();
         assert!(!state.has_unsaved_settings(), "a fresh draft matches");
-        state.draft.local_echo = false;
+        state.draft.local_echo = true;
         assert!(state.has_unsaved_settings());
         state.cancel_settings();
         assert!(!state.has_unsaved_settings());

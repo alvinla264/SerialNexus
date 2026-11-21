@@ -49,11 +49,13 @@ these words in their tool names and user-facing text.
   bounded result; there is no continuous stream.
 - **Settings**: the human terminal's own preferences, stored per user in
   `terminal.json` (`local_echo`, `scrollback`, `share_address` and `share_port`).
-  Echo and scrollback default on; sharing defaults to loopback at port 7331. The
-  checked-device list and pairing credentials are session-only, not settings.
+  Echo defaults off and scrollback on; sharing defaults to loopback at port
+  7331. The checked-device list and pairing credentials are session-only, not
+  settings.
 - **Local echo**: showing the keys a human types in the **stream** in the
-  terminal's own view. On by default; the `local_echo` **setting** turns it off
-  for a device that echoes what it receives.
+  terminal's own view. Off by default, so a device that echoes what it receives
+  does not show every key twice; the `local_echo` **setting** turns it on for a
+  device that does not echo.
 - **Sidebar**: the terminal's list of **devices** and its Settings button. At a
   usable width it sits on the left, beside the right pane; a narrow terminal
   shows it only while it has the **focus**.

@@ -2614,7 +2614,6 @@ mod tests {
     fn the_settings_view_shows_both_flags_and_the_cursor_follows_the_selection() {
         let mut state = demo();
         state.begin_settings();
-        state.draft.local_echo = false;
         let text = screen(&state, 100, 16).join("\n");
         assert!(text.contains("Settings"), "{text}");
         assert!(text.contains("Local echo"), "{text}");

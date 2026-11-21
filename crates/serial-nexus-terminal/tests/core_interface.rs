@@ -472,32 +472,39 @@ fn launch_settings_are_loaded_into_the_app_and_do_not_change_baud_behavior() {
 }
 
 #[test]
-fn local_echo_is_on_by_default_and_stops_when_it_is_turned_off() {
+fn local_echo_is_off_by_default_and_can_be_turned_on_and_saved() {
     let (_dir, socket) = start_core(Duration::from_secs(5), Duration::from_secs(300), 500);
     let mut device = SimulatedDevice::new();
     let config = tempfile::tempdir().unwrap();
     let store =
         serial_nexus_terminal::settings::SettingsStore::at(config.path().join("terminal.json"));
     let settings = store.load_or_create().expect("settings file");
+    assert!(!settings.local_echo, "local echo is off by default");
     let mut app = App::with_preferences(
         Client::connect_to_socket(&socket, ClientInfo::human("terminal-echo-default"))
             .expect("terminal connects"),
         40,
         120,
         settings,
-        Some(store),
+        Some(store.clone()),
     );
-    assert!(app.settings().local_echo, "local echo is on by default");
+    assert!(!app.settings().local_echo, "local echo is off by default");
     app.open_path(&device.path, Some(115_200)).expect("open");
     assert_eq!(app.state.focus, Focus::Right);
 
-    for ch in "ab".chars() {
+    // Keys reach the device but are not drawn locally. The device's own
+    // output after them is the render barrier that makes the absence real.
+    for ch in "TYPED".chars() {
         app.handle_key(Key::Char(ch));
     }
-    device.read_until(b"ab", Duration::from_secs(3));
+    device.read_until(b"TYPED", Duration::from_secs(3));
+    device.write(b"device-output\r\n");
+    pump_until(&mut app, Duration::from_secs(3), |app| {
+        stream_text(app).contains("device-output")
+    });
     assert!(
-        stream_text(&app).contains("ab"),
-        "local echo is on: {:?}",
+        !stream_text(&app).contains("TYPED"),
+        "human typing must not be echoed locally: {:?}",
         stream_text(&app)
     );
 
@@ -509,15 +516,19 @@ fn local_echo_is_on_by_default_and_stops_when_it_is_turned_off() {
     app.handle_key(Key::Enter);
     assert_eq!(app.state.view, View::Settings);
     app.handle_key(Key::Char(' '));
-    assert!(!app.state.draft.local_echo, "the draft flips");
+    assert!(app.state.draft.local_echo, "the draft flips on");
     assert!(
-        app.state.settings.local_echo,
+        !app.state.settings.local_echo,
         "nothing is in effect before saving"
     );
     app.handle_key(Key::Ctrl('s'));
     assert_eq!(app.state.view, View::Stream, "Save returns to the stream");
     assert_eq!(app.state.focus, Focus::Right);
-    assert!(!app.state.settings.local_echo, "Ctrl+S keeps the change");
+    assert!(app.state.settings.local_echo, "Ctrl+S keeps the change");
+    assert!(
+        store.load().expect("load").expect("file").local_echo,
+        "the saved file holds an explicit on"
+    );
 
     for ch in "cd".chars() {
         app.handle_key(Key::Char(ch));
@@ -525,12 +536,127 @@ fn local_echo_is_on_by_default_and_stops_when_it_is_turned_off() {
     device.read_until(b"cd", Duration::from_secs(3));
     app.pump();
     assert!(
-        !stream_text(&app).contains("cd"),
-        "local echo is off: {:?}",
+        stream_text(&app).contains("cd"),
+        "local echo is on: {:?}",
+        stream_text(&app)
+    );
+    app.shutdown();
+
+    // A later launch reads the saved explicit on and echoes again.
+    let reloaded = store.load().expect("load").expect("saved file");
+    assert!(reloaded.local_echo);
+    let mut restarted = App::with_preferences(
+        Client::connect_to_socket(&socket, ClientInfo::human("terminal-echo-restart"))
+            .expect("terminal connects"),
+        40,
+        120,
+        reloaded,
+        Some(store),
+    );
+    restarted
+        .open_path(&device.path, Some(115_200))
+        .expect("reopen");
+    for ch in "ef".chars() {
+        restarted.handle_key(Key::Char(ch));
+    }
+    device.read_until(b"ef", Duration::from_secs(3));
+    restarted.pump();
+    assert!(
+        stream_text(&restarted).contains("ef"),
+        "the saved on survives a restart: {:?}",
+        stream_text(&restarted)
+    );
+    restarted.shutdown();
+}
+
+#[test]
+fn an_explicit_local_echo_on_is_preserved_and_can_be_saved_off_across_restarts() {
+    let (_dir, socket) = start_core(Duration::from_secs(5), Duration::from_secs(300), 500);
+    let mut device = SimulatedDevice::new();
+    let config = tempfile::tempdir().unwrap();
+    let path = config.path().join("terminal.json");
+    std::fs::write(&path, "{\"local_echo\":true}").unwrap();
+    let store = serial_nexus_terminal::settings::SettingsStore::at(&path);
+    let settings = store.load().expect("load").expect("file");
+    assert!(settings.local_echo, "an explicit on is preserved on load");
+
+    let mut app = App::with_preferences(
+        Client::connect_to_socket(&socket, ClientInfo::human("terminal-echo-explicit-on"))
+            .expect("terminal connects"),
+        40,
+        120,
+        settings,
+        Some(store.clone()),
+    );
+    app.open_path(&device.path, Some(115_200)).expect("open");
+    for ch in "gh".chars() {
+        app.handle_key(Key::Char(ch));
+    }
+    device.read_until(b"gh", Duration::from_secs(3));
+    app.pump();
+    assert!(
+        stream_text(&app).contains("gh"),
+        "the preserved on still echoes: {:?}",
         stream_text(&app)
     );
 
+    // Turn it off through Settings and save: the file now holds an explicit
+    // off, and a later launch keeps it off.
+    app.handle_key(Key::Ctrl(']'));
+    app.state.select_settings_button();
+    app.handle_key(Key::Enter);
+    app.handle_key(Key::Char(' '));
+    assert!(!app.state.draft.local_echo, "the draft flips off");
+    app.handle_key(Key::Ctrl('s'));
+    assert!(!app.state.settings.local_echo, "Ctrl+S applies the off");
+    assert!(
+        !store.load().expect("load").expect("file").local_echo,
+        "the saved file holds an explicit off"
+    );
+
+    for ch in "QUIET".chars() {
+        app.handle_key(Key::Char(ch));
+    }
+    device.read_until(b"QUIET", Duration::from_secs(3));
+    device.write(b"device-after-off\r\n");
+    pump_until(&mut app, Duration::from_secs(3), |app| {
+        stream_text(app).contains("device-after-off")
+    });
+    assert!(
+        !stream_text(&app).contains("QUIET"),
+        "saved off stops local echo while device output stays: {:?}",
+        stream_text(&app)
+    );
     app.shutdown();
+
+    // A restart reads the explicit off and keeps not echoing.
+    let reloaded = store.load().expect("load").expect("saved file");
+    assert!(!reloaded.local_echo);
+    let mut restarted = App::with_preferences(
+        Client::connect_to_socket(&socket, ClientInfo::human("terminal-echo-restart-off"))
+            .expect("terminal connects"),
+        40,
+        120,
+        reloaded,
+        Some(store),
+    );
+    restarted
+        .open_path(&device.path, Some(115_200))
+        .expect("reopen");
+    for ch in "SILENT".chars() {
+        restarted.handle_key(Key::Char(ch));
+    }
+    device.read_until(b"SILENT", Duration::from_secs(3));
+    device.write(b"device-after-restart\r\n");
+    pump_until(&mut restarted, Duration::from_secs(3), |app| {
+        stream_text(app).contains("device-after-restart")
+    });
+    assert!(
+        !stream_text(&restarted).contains("SILENT"),
+        "the saved off survives a restart: {:?}",
+        stream_text(&restarted)
+    );
+    restarted.shutdown();
 }
 
 #[test]
@@ -543,7 +669,7 @@ fn settings_escape_throws_the_draft_away_and_shows_both_flags() {
     assert_eq!(AppState::settings_row_name(0), Some("Local echo"));
     assert_eq!(AppState::settings_row_name(1), Some("Scrollback"));
     app.handle_key(Key::Char(' '));
-    assert!(!app.state.draft.local_echo);
+    assert!(app.state.draft.local_echo);
     app.handle_key(Key::Tab);
     assert_eq!(app.state.settings_row, 1);
     app.handle_key(Key::Char(' '));
@@ -611,12 +737,12 @@ fn a_setting_changed_in_the_settings_view_is_saved_on_ctrl_s() {
     assert_eq!(app.state.view, View::Settings);
     app.handle_key(Key::Char(' '));
     assert!(
-        store.load().expect("load").expect("file").local_echo,
+        !store.load().expect("load").expect("file").local_echo,
         "the draft alone is not written"
     );
     app.handle_key(Key::Ctrl('s'));
     assert!(
-        !store.load().expect("load").expect("file").local_echo,
+        store.load().expect("load").expect("file").local_echo,
         "Ctrl+S wrote the change"
     );
 
@@ -943,8 +1069,11 @@ fn unsaved_settings_refuse_device_opening_and_keep_the_draft() {
     assert_eq!(app.state.focus, Focus::Right);
     app.handle_key(Key::Esc);
     assert_eq!(app.state.view, View::Stream);
-    assert!(app.state.settings.local_echo, "Cancel kept the old options");
-    assert!(app.state.draft.local_echo, "Cancel threw the draft away");
+    assert!(
+        !app.state.settings.local_echo,
+        "Cancel kept the old options"
+    );
+    assert!(!app.state.draft.local_echo, "Cancel threw the draft away");
 
     app.shutdown();
 }
@@ -991,7 +1120,7 @@ fn a_resize_keeps_the_session_the_draft_and_the_scroll_position() {
             "the active session survives a resize"
         );
         assert_eq!(app.state.view, View::Settings);
-        assert!(!app.state.draft.local_echo, "the draft survives a resize");
+        assert!(app.state.draft.local_echo, "the draft survives a resize");
         assert_eq!(
             app.state.shown_session().unwrap().screen.scroll(),
             scroll,
@@ -1041,7 +1170,7 @@ fn a_disconnect_while_settings_are_open_keeps_the_draft_and_other_session() {
         View::Settings,
         "a disconnect never closes the settings"
     );
-    assert!(!app.state.draft.local_echo, "the draft is kept");
+    assert!(app.state.draft.local_echo, "the draft is kept");
     let notice = app.state.notice.as_ref().expect("unplug notice");
     assert!(notice.text.contains(&first_path), "{}", notice.text);
 
@@ -1090,7 +1219,7 @@ fn settings_clicked_during_a_baud_prompt_takes_the_keys_and_cancels_the_prompt()
 
     // The settings keys reach the settings, not the prompt.
     app.handle_key(Key::Char(' '));
-    assert!(!app.state.draft.local_echo);
+    assert!(app.state.draft.local_echo);
     app.handle_key(Key::Ctrl('s'));
     assert_eq!(app.state.view, View::Stream);
     assert!(app.state.sessions.is_empty(), "no device was opened");
@@ -1231,32 +1360,32 @@ fn the_settings_page_has_mouse_toggles_and_a_mouse_save_and_cancel() {
     app.handle_click(area, right.x, right.y);
     let mut layout = settings_layout(right).expect("settings layout");
     app.handle_click(area, layout.rows.x, layout.rows.y);
-    assert!(!app.state.draft.local_echo, "the click flipped the flag");
+    assert!(app.state.draft.local_echo, "the click flipped the flag");
     assert!(
-        app.state.settings.local_echo,
+        !app.state.settings.local_echo,
         "the active option is unchanged"
     );
     assert!(
-        store.load().expect("load").expect("file").local_echo,
+        !store.load().expect("load").expect("file").local_echo,
         "nothing was written before Save"
     );
 
     // Cancel throws the draft away and writes nothing.
     app.handle_click(area, layout.cancel.x + 1, layout.cancel.y);
     assert_eq!(app.state.view, View::Stream);
-    assert!(app.state.settings.local_echo);
-    assert!(app.state.draft.local_echo);
-    assert!(store.load().expect("load").expect("file").local_echo);
+    assert!(!app.state.settings.local_echo);
+    assert!(!app.state.draft.local_echo);
+    assert!(!store.load().expect("load").expect("file").local_echo);
 
     // Save writes the file and only then applies the change.
     click(&mut app, area, button.x + 2, button.y);
     layout = settings_layout(right).expect("settings layout");
     app.handle_click(area, layout.rows.x, layout.rows.y);
-    assert!(!app.state.draft.local_echo);
+    assert!(app.state.draft.local_echo);
     app.handle_click(area, layout.save.x + 1, layout.save.y);
     assert_eq!(app.state.view, View::Stream, "Save leaves the settings");
-    assert!(!app.state.settings.local_echo, "Save applied the change");
-    assert!(!store.load().expect("load").expect("file").local_echo);
+    assert!(app.state.settings.local_echo, "Save applied the change");
+    assert!(store.load().expect("load").expect("file").local_echo);
 
     app.shutdown();
 }
@@ -1476,10 +1605,7 @@ fn a_quick_second_click_on_a_settings_flag_is_not_swallowed() {
         layout.rows.y,
         at,
     );
-    assert!(
-        !app.state.draft.local_echo,
-        "the first click toggles it off"
-    );
+    assert!(app.state.draft.local_echo, "the first click toggles it on");
     app.handle_mouse(
         area,
         MouseEventKind::Down(MouseButton::Left),
@@ -1488,8 +1614,8 @@ fn a_quick_second_click_on_a_settings_flag_is_not_swallowed() {
         at + Duration::from_millis(50),
     );
     assert!(
-        app.state.draft.local_echo,
-        "the second click toggles it back on, not swallowed as a double-click"
+        !app.state.draft.local_echo,
+        "the second click toggles it back off, not swallowed as a double-click"
     );
 
     app.shutdown();
@@ -1619,7 +1745,7 @@ fn a_baud_prompt_cannot_open_past_an_unsaved_settings_draft() {
         "a clean draft may ask for a baud"
     );
     // A settings click can make the draft dirty while the prompt is pending.
-    app.state.draft.local_echo = false;
+    app.state.draft.local_echo = true;
     app.handle_key(Key::Enter);
 
     assert!(app.state.prompt.is_none(), "the refused prompt is dropped");
