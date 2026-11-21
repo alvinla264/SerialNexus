@@ -263,10 +263,11 @@ stops sharing it owns.
   erase, SGR colours/attributes, OSC titles ignored). AI writes appear inline in
   a distinct colour, without labels; human writes are not added to the stream as
   events.
-- Local echo is on by default: the keys a person types in the focused stream are
-  shown in the screen's default style once the device accepted the write, so
-  typing is visible on a device that does not echo. Turn it off in the settings
-  when the device echoes what it receives.
+- Local echo is off by default: a device that echoes what it receives does not
+  show every key twice, and genuine device echo stays visible. Turn it on in the
+  settings to show the keys a person types in the focused stream in the screen's
+  default style once the device accepted the write, for a device that does not
+  echo.
 - The settings open in the right pane while the sidebar stays visible. The view
   lists `local_echo`, `scrollback`, the share address and port, and one
   session-only checkbox per detected local device. `Tab`, `Shift+Tab` and
@@ -297,9 +298,9 @@ stops sharing it owns.
   the status line and hides the hints.
 - Settings are stored per user in `$XDG_CONFIG_HOME/serial-nexus/terminal.json`
   (`~/.config/serial-nexus/terminal.json` when `XDG_CONFIG_HOME` is unset and
-  `HOME` is set). The file holds `local_echo` and `scrollback` (both on by
-  default), plus `share_address` (loopback by default) and `share_port` (7331
-  by default). The checked-device list and pairing credentials are
+  `HOME` is set). The file holds `local_echo` (off by default) and `scrollback`
+  (on by default), plus `share_address` (loopback by default) and `share_port`
+  (7331 by default). The checked-device list and pairing credentials are
   session-only. The terminal loads settings at launch and writes defaults on
   first launch. An invalid or unreadable file is reported in the footer and
   left untouched, never silently replaced, and settings changed in that launch

@@ -106,7 +106,7 @@ path as a real serial port and the test drives the master. Covered end to end:
 - the terminal's side-by-side layout at a usable width and focused-pane layout
   when narrow, single-click highlight never changing the shown stream,
   Enter/double-click opening, focus switching with `Ctrl+]` without redirecting
-  writes, local echo on by default and off after a saved change, the stream
+  writes, local echo off by default and on after a saved change, the stream
   owning `Tab` and `Ctrl+Q` while the sidebar quits on `Ctrl+Q`, the sidebar
   sending a literal `Ctrl+]` to the shown device, `b` from the sidebar opening
   the scrollback and `Esc` returning to the live stream, arrow and page

@@ -508,14 +508,14 @@ fn a_failed_settings_publish_does_not_detach_remote_sessions() {
         .expect("detected device");
     app.state.settings_row = SETTINGS_FIXED_ROWS + row;
     assert_eq!(app.state.toggle_draft(), Some(false));
-    app.state.draft.local_echo = false;
+    app.state.draft.local_echo = true;
 
     std::fs::remove_file(&fixture.settings_path).expect("remove settings file");
     std::fs::create_dir(&fixture.settings_path).expect("force publication failure");
     save(&mut app);
 
     assert!(
-        app.state.settings.local_echo,
+        !app.state.settings.local_echo,
         "failed Save does not apply preferences"
     );
     assert!(app.state.sharing.checked().contains(&path));
@@ -699,7 +699,7 @@ fn a_failed_settings_save_applies_neither_the_preferences_nor_the_checklist() {
     start(&mut app);
 
     app.state.begin_settings();
-    app.state.draft.local_echo = false;
+    app.state.draft.local_echo = true;
     let index = app
         .state
         .devices
@@ -729,11 +729,11 @@ fn a_failed_settings_save_applies_neither_the_preferences_nor_the_checklist() {
     );
     assert_eq!(app.state.view, serial_nexus_terminal::state::View::Settings);
     assert!(
-        app.state.settings.local_echo,
-        "the option in effect stays on"
+        !app.state.settings.local_echo,
+        "the option in effect stays off"
     );
     assert!(
-        !app.state.draft.local_echo,
+        app.state.draft.local_echo,
         "the attempted preference stays in the draft"
     );
     assert!(app.state.sharing.active, "sharing remains active");
@@ -886,10 +886,10 @@ fn saving_preferences_still_works_after_adding_a_device_to_active_sharing() {
 
     app.refresh_devices();
     app.state.begin_settings();
-    app.state.draft.local_echo = false;
+    app.state.draft.local_echo = true;
     save(&mut app);
 
-    assert!(!app.state.settings.local_echo);
+    assert!(app.state.settings.local_echo);
     assert!(app.state.sharing.checked().contains(&first));
     assert!(app.state.sharing.checked().contains(&added));
     assert_eq!(
@@ -933,13 +933,13 @@ fn saving_preferences_does_not_revoke_a_shared_device_during_temporary_identity_
     );
 
     app.state.begin_settings();
-    app.state.draft.local_echo = false;
+    app.state.draft.local_echo = true;
     save(&mut app);
 
     assert!(app.state.sharing.active);
     assert!(app.state.sharing.checked().contains(&path));
     assert!(app.state.sharing.pending_checked.contains(&path));
-    assert!(app.state.settings.local_echo);
+    assert!(!app.state.settings.local_echo);
     assert!(
         app.state.notice.as_ref().is_some_and(|notice| {
             notice.severity == Severity::Error && notice.text.contains("cannot verify")

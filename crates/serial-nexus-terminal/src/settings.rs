@@ -20,7 +20,9 @@ pub const SETTINGS_FILE: &str = "terminal.json";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
-    /// Echo keys typed in the stream back into the local view.
+    /// Echo keys typed in the stream back into the local view. Off by
+    /// default, so a device that echoes what it receives does not show every
+    /// key twice.
     pub local_echo: bool,
     /// Keep device output around for scrolling back.
     pub scrollback: bool,
@@ -33,7 +35,7 @@ pub struct TerminalSettings {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            local_echo: true,
+            local_echo: false,
             scrollback: true,
             // Loopback is the safe default: reaching it from another machine
             // takes a deliberate change of address.
@@ -328,9 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_both_on() {
+    fn local_echo_and_scrollback_default_to_off_and_on() {
         let settings = TerminalSettings::default();
-        assert!(settings.local_echo, "local echo is on by default");
+        assert!(!settings.local_echo, "local echo is off by default");
         assert!(settings.scrollback, "scrollback is on by default");
     }
 
@@ -340,16 +342,14 @@ mod tests {
         let store = SettingsStore::at(dir.path().join("config/terminal.json"));
 
         assert_eq!(store.load().expect("missing is fine"), None);
-        assert_eq!(
-            store.load_or_create().expect("created"),
-            TerminalSettings::default()
-        );
+        let created = store.load_or_create().expect("created");
+        assert_eq!(created, TerminalSettings::default());
+        assert!(!created.local_echo, "a first launch starts with echo off");
 
         // The next launch reads what the first one wrote.
-        assert_eq!(
-            store.load().expect("load").expect("the file exists"),
-            TerminalSettings::default()
-        );
+        let loaded = store.load().expect("load").expect("the file exists");
+        assert_eq!(loaded, TerminalSettings::default());
+        assert!(!loaded.local_echo, "the written default stays off");
     }
 
     #[test]
@@ -401,16 +401,77 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_ignored_and_missing_fields_stay_on() {
+    fn a_missing_local_echo_field_takes_the_new_off_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("terminal.json");
-        std::fs::write(&path, "{\"local_echo\":false,\"future\":true}").unwrap();
+        let text = "{\"scrollback\":false}";
+        std::fs::write(&path, text).unwrap();
+
         let settings = SettingsStore::at(&path)
             .load()
             .expect("load")
             .expect("file");
+
+        assert!(!settings.local_echo, "the new default is off");
+        assert!(!settings.scrollback, "an explicit field is kept");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "loading never rewrites the user's file"
+        );
+    }
+
+    #[test]
+    fn a_missing_scrollback_field_keeps_its_on_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminal.json");
+        std::fs::write(&path, "{\"local_echo\":false}").unwrap();
+
+        let settings = SettingsStore::at(&path)
+            .load()
+            .expect("load")
+            .expect("file");
+
         assert!(!settings.local_echo);
-        assert!(settings.scrollback, "a missing field keeps its default");
+        assert!(settings.scrollback, "a missing scrollback field stays on");
+    }
+
+    #[test]
+    fn explicit_local_echo_values_are_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let on_path = dir.path().join("on.json");
+        std::fs::write(&on_path, "{\"local_echo\":true}").unwrap();
+        let on = SettingsStore::at(&on_path)
+            .load()
+            .expect("load")
+            .expect("file");
+        assert!(on.local_echo, "an explicit on survives");
+
+        let off_path = dir.path().join("off.json");
+        std::fs::write(&off_path, "{\"local_echo\":false}").unwrap();
+        let off = SettingsStore::at(&off_path)
+            .load()
+            .expect("load")
+            .expect("file");
+        assert!(!off.local_echo, "an explicit off survives");
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminal.json");
+        std::fs::write(
+            &path,
+            "{\"local_echo\":true,\"scrollback\":false,\"future\":true}",
+        )
+        .unwrap();
+        let settings = SettingsStore::at(&path)
+            .load()
+            .expect("load")
+            .expect("file");
+        assert!(settings.local_echo);
+        assert!(!settings.scrollback);
     }
 
     #[test]
